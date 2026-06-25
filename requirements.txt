@@ -1,0 +1,33 @@
+# Python 依赖（版本锁定自 2026-06-25 的工作环境，pip freeze 核对）
+# 安装：  pip install -r requirements.txt
+
+# --- LangGraph / LangChain ---
+langgraph==1.0.5
+langgraph-checkpoint==3.0.1
+langchain==1.2.3
+langchain-core==1.2.7
+langchain-openai==1.1.7
+langsmith==0.6.2
+
+# --- LLM SDKs ---
+openai==2.15.0
+dashscope==1.25.9
+
+# --- Web API ---
+fastapi==0.135.1
+uvicorn==0.40.0
+starlette==0.52.1
+sse-starlette==3.2.0
+
+# --- MCP / HTTP ---
+mcp==1.26.0
+httpx==0.28.1
+httpx-sse==0.4.3
+
+# --- Config / models ---
+pydantic==2.12.5
+pydantic-settings==2.12.0
+python-dotenv==1.0.0
+
+# --- CLI / output ---
+rich==14.2.0

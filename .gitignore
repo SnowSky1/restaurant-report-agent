@@ -1,0 +1,42 @@
+# ============ Secrets ============
+# 绝不提交真实密钥。.env 含真 key（已泄露，需轮换）。
+.env
+.env.*
+!.env.example
+
+# ============ Unrelated / sensitive ============
+# cursor 聊天导出：与项目无关，且散落多个真实 API key —— 不纳入版本控制（文件保留在本地）。
+cursor-chat-export/
+
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ============ Generated output ============
+reports/
+*.log
+
+# ============ Frontend ============
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+
+# ============ OS / IDE ============
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
