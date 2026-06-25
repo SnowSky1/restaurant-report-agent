@@ -36,16 +36,18 @@
 
 🎯 在碰任何"高级"东西之前，先把会让你后面返工/出事的三件事清掉：泄露的 key、不可复现的依赖、不是仓库的仓库。这是可靠性工程师的本职，不是杂活。
 
-✅ 任务
-- [ ] **轮换泄露的 key**：`.env` 里的 `QWEN_API_KEY`、`AMAP_MAPS_API_KEY`，和 `快速测试.bat:13-20` 里硬编码的 `SILICONFLOW_API_KEY`/`AMAP_MAPS_API_KEY`——全部去对应平台**作废重发**。（它们已经在明文里躺过，必须当成已泄露。）
-- [ ] 新建仓库根 `.gitignore`，至少含 `.env`、`__pycache__/`、`*.pyc`、`reports/`、`frontend/node_modules/`、`frontend/.next/`。
-- [ ] 把 `快速测试.bat` 里的明文 key 删掉，改成从 `.env` 读。
-- [ ] `pip freeze > requirements.txt`（或手写一份带版本的），锁住 langgraph / langchain / langchain-openai / fastapi / uvicorn / pydantic / httpx 等。
-- [ ] `git init` → 确认 `git status` **看不到 `.env`** → 第一个干净 commit（`chore: initial clean commit, secrets rotated`）。
-- [ ] 顺手修 CORS 非法组合：`api/main.py:18-19` 把 `allow_origins=["*"]` 改成显式 allowlist（开发期 `["http://localhost:3000"]`）。
+✅ 任务（W0 大部分已由 Claude 执行，commit `ccac60a`；⬇ 只剩一项是只有你能做的）
+- [ ] **轮换泄露的 key** ← **只有你能做（要登录控制台）**：去 DashScope / 高德 / SiliconFlow 后台，把这几个**作废重发**：Qwen `sk-abb7b1…`、高德 `6345d208…`（和旧的 `41c0c2dc…`）、SiliconFlow `sk-heamk…`。它们已泄露进 `.env` + `快速测试.bat` + `cursor-chat-export/` 多处明文，必须轮换。换完把新 key 填进 `.env`（已 gitignore，不会进库）。
+- [x] 根 `.gitignore` 已建（含 `.env`、`cursor-chat-export/`、Python/前端/输出缓存）。
+- [x] `快速测试.bat` 明文 key 已替换为占位符。
+- [x] `requirements.txt` 已按 `pip freeze` 锁定真实版本（langgraph 1.0.5 / langchain 1.2.3 / fastapi 0.135.1 …）。
+- [x] `git init` + 首个干净 commit `ccac60a`；已校验 `.env`、`cursor-chat-export/` **未被跟踪**，暂存内容密钥扫描通过。
+- [x] CORS 已修：`api/main.py` 改为 env 驱动 allowlist（`ALLOWED_ORIGINS`，默认 `http://localhost:3000`），不再 `["*"]`+credentials 非法组合。
+- [x] 附带：建了不含密钥的 `.env.example` 模板（`cp .env.example .env` 即可起步）。
+- [ ] **待你定**：`frontend/` 自带 `.git/`，已从本仓库暂存区移除（**文件未动**），暂时保持它为独立仓库。要并库 / 做 submodule 随时说。
 
 🧠 能力：secrets management / 密钥轮换、repo 卫生、依赖锁定与可复现环境。
-📐 验收：全新 clone 这个 repo + `pip install -r requirements.txt` 能装起来；`git log` 里**任何一次提交都搜不到真 key**；CORS 不再是 `*`+credentials。
+📐 验收：✅ 全新 clone + `pip install -r requirements.txt` 可装；✅ `git log` 任何提交搜不到真 key；✅ CORS 不再是 `*`+credentials。**剩你做完密钥轮换，W0 就 100% 关闭。**
 
 ---
 
