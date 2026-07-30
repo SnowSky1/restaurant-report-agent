@@ -1,127 +1,124 @@
-"""
-状态定义模块
+"""Typed state shared by the LangGraph workflow."""
 
-定义 LangGraph 工作流使用的 AgentState 和各类数据结构
-"""
+from __future__ import annotations
 
-from typing import TypedDict, Optional, List, Any
 from dataclasses import dataclass, field
+from typing import Any, Optional, TypedDict
+from uuid import uuid4
 
 
 @dataclass
 class LocationInfo:
-    """位置信息"""
-    coordinates: str  # 经纬度，格式: "116.481488,39.990464"
-    address: str  # 格式化地址
-    business_area: str  # 所属商圈
-    district: str = ""  # 区县
-    city: str = ""  # 城市
+    coordinates: str
+    address: str
+    business_area: str = ""
+    district: str = ""
+    city: str = ""
+    adcode: str = ""
+    source: str = "unknown"
 
 
 @dataclass
 class CompetitorInfo:
-    """竞争对手信息"""
-    name: str  # 店铺名称
-    distance: str  # 距离（米）
-    address: str  # 地址
-    rating: str = ""  # 评分
-    type: str = ""  # 类型
+    name: str
+    distance: str
+    address: str
+    rating: str = ""
+    type: str = ""
+    typecode: str = ""
+    location: str = ""
+    average_cost: str = ""
+    source: str = "unknown"
 
 
 @dataclass
 class TrafficInfo:
-    """交通信息"""
-    subway_stations: List[dict] = field(default_factory=list)  # 地铁站
-    bus_stations: List[dict] = field(default_factory=list)  # 公交站
-    parking_lots: List[dict] = field(default_factory=list)  # 停车场
-    traffic_score: dict = field(default_factory=dict)  # 交通评分 {"综合": 8.5, "地铁": 9, ...}
-    summary: str = ""  # 交通总结
+    subway_stations: list[dict[str, Any]] = field(default_factory=list)
+    bus_stations: list[dict[str, Any]] = field(default_factory=list)
+    parking_lots: list[dict[str, Any]] = field(default_factory=list)
+    traffic_score: dict[str, float] = field(default_factory=dict)
+    summary: str = ""
 
 
 @dataclass
 class WeatherData:
-    """天气数据"""
-    current: dict = field(default_factory=dict)  # 当前天气
-    forecast: List[dict] = field(default_factory=list)  # 天气预报
-    business_impact: str = ""  # 对经营的影响分析
+    current: dict[str, Any] = field(default_factory=dict)
+    forecast: list[dict[str, Any]] = field(default_factory=list)
+    business_impact: str = ""
 
 
 @dataclass
 class POIAnalysis:
-    """POI 分析结果"""
-    poi_counts: dict = field(default_factory=dict)  # 各类型 POI 数量
-    poi_details: List[dict] = field(default_factory=list)  # POI 详情
-    poi_summary: str = ""  # POI 分析总结
+    poi_counts: dict[str, int] = field(default_factory=dict)
+    poi_details: list[dict[str, Any]] = field(default_factory=list)
+    poi_summary: str = ""
 
 
 @dataclass
 class ChartData:
-    """图表数据"""
-    competitor_chart: dict = field(default_factory=dict)
-    poi_chart: dict = field(default_factory=dict)
-    traffic_chart: dict = field(default_factory=dict)
+    competitor_chart: dict[str, Any] = field(default_factory=dict)
+    poi_chart: dict[str, Any] = field(default_factory=dict)
+    traffic_chart: dict[str, Any] = field(default_factory=dict)
+    revenue_chart: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentState(TypedDict, total=False):
-    """
-    LangGraph Agent 状态定义
-    
-    包含店铺分析所需的所有状态字段
-    """
-    # 输入参数
-    store_name: str  # 店铺名称
-    store_address: str  # 店铺地址
-    store_type: str  # 店铺类型
-    analysis_radius: int  # 分析半径（米）
-    
-    # 分析结果
-    location: Optional[LocationInfo]  # 位置信息
-    competitors: Optional[List[CompetitorInfo]]  # 竞争对手列表
-    traffic: Optional[TrafficInfo]  # 交通信息
-    weather: Optional[WeatherData]  # 天气数据
-    poi_analysis: Optional[POIAnalysis]  # POI 分析
-    charts: Optional[ChartData]  # 图表数据
-    
-    # 深度分析结果 (CompeteAI 理论框架)
-    competition_analysis: Optional[dict]  # 深度竞争分析结果
-    
-    # 输出
-    final_report: Optional[str]  # 最终报告（Markdown 格式）
-    
-    # 错误追踪
-    errors: List[str]
+    run_id: str
+    store_name: str
+    store_address: str
+    store_type: str
+    analysis_radius: int
+    input_coordinates: Optional[str]
+    avg_ticket: Optional[float]
+    seat_count: Optional[int]
+    daily_fixed_cost: Optional[float]
+    variable_cost_rate: Optional[float]
+
+    location: Optional[LocationInfo]
+    competitors: Optional[list[CompetitorInfo]]
+    traffic: Optional[TrafficInfo]
+    weather: Optional[WeatherData]
+    poi_analysis: Optional[POIAnalysis]
+    competition_analysis: Optional[dict[str, Any]]
+    revenue_simulation: Optional[dict[str, Any]]
+    charts: Optional[ChartData]
+    provenance: dict[str, Any]
+    final_report: Optional[str]
+    errors: list[str]
 
 
 def create_initial_state(
     store_name: str,
     store_address: str,
     store_type: str = "餐厅",
-    analysis_radius: int = 1000
+    analysis_radius: int = 1000,
+    *,
+    input_coordinates: str | None = None,
+    avg_ticket: float | None = None,
+    seat_count: int | None = None,
+    daily_fixed_cost: float | None = None,
+    variable_cost_rate: float | None = None,
 ) -> AgentState:
-    """
-    创建初始状态
-    
-    Args:
-        store_name: 店铺名称
-        store_address: 店铺地址
-        store_type: 店铺类型
-        analysis_radius: 分析半径（米）
-        
-    Returns:
-        AgentState: 初始化的状态字典
-    """
     return AgentState(
+        run_id=uuid4().hex,
         store_name=store_name,
         store_address=store_address,
         store_type=store_type,
         analysis_radius=analysis_radius,
+        input_coordinates=input_coordinates,
+        avg_ticket=avg_ticket,
+        seat_count=seat_count,
+        daily_fixed_cost=daily_fixed_cost,
+        variable_cost_rate=variable_cost_rate,
         location=None,
-        competitors=None,
+        competitors=[],
         traffic=None,
         weather=None,
         poi_analysis=None,
-        charts=None,
         competition_analysis=None,
+        revenue_simulation=None,
+        charts=None,
+        provenance={},
         final_report=None,
-        errors=[]
+        errors=[],
     )

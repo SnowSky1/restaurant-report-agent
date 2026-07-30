@@ -34,6 +34,7 @@ async def report_node(state: AgentState, llm: Any = None) -> dict:
     store_name = state.get("store_name", "未知店铺")
     report_sections.append(f"# {store_name} 经营分析报告\n")
     report_sections.append(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    report_sections.append(_build_provenance_notice(state))
     
     # 一、基本信息
     report_sections.append(_build_basic_info_section(state))
@@ -56,6 +57,10 @@ async def report_node(state: AgentState, llm: Any = None) -> dict:
     # 七、深度竞争分析（如果有）
     if state.get("competition_analysis"):
         report_sections.append(_build_competition_analysis_section(state))
+
+    # 八、定价与营收情景模拟
+    if state.get("revenue_simulation"):
+        report_sections.append(_build_revenue_section(state))
     
     # 八、综合建议
     if llm:
@@ -90,6 +95,17 @@ def _build_basic_info_section(state: AgentState) -> str:
 | 店铺类型 | {state.get('store_type', '-')} |
 | 分析半径 | {state.get('analysis_radius', 1000)} 米 |
 """
+
+
+def _build_provenance_notice(state: AgentState) -> str:
+    provenance = state.get("provenance") or {}
+    sources = provenance.get("sources") or []
+    source_text = "、".join(sources) if sources else "未记录"
+    if provenance.get("used_mock_data"):
+        warnings = provenance.get("warnings") or []
+        details = "；".join(dict.fromkeys(warnings))
+        return f"> ⚠️ **数据说明**：本报告混合或使用了模拟数据。来源：{source_text}。{details}\n"
+    return f"> ✅ **数据说明**：本次位置与周边数据来源：{source_text}。营收结果仍属于假设情景模拟。\n"
 
 
 def _build_location_section(state: AgentState) -> str:
@@ -277,10 +293,38 @@ def _build_competition_analysis_section(state: AgentState) -> str:
     return section
 
 
+def _build_revenue_section(state: AgentState) -> str:
+    simulation = state.get("revenue_simulation") or {}
+    base = simulation.get("base_revenue") or {}
+    assumptions = simulation.get("assumptions") or {}
+    scenarios = simulation.get("scenario_simulations") or []
+    section = "\n## 八、定价与营收情景模拟\n\n"
+    section += f"> 模型：{simulation.get('model', '-')}。以下是情景估算，不是财务承诺。\n\n"
+    section += f"- **建议情景**：{simulation.get('recommended_strategy_name', '-')}\n"
+    section += f"- **基准日订单**：{base.get('daily_orders', '-')} 单\n"
+    section += f"- **基准月营收**：¥{base.get('monthly_revenue', 0):,.0f}\n"
+    section += f"- **基准月利润**：¥{base.get('monthly_profit', 0):,.0f}\n"
+    section += f"- **日盈亏平衡订单**：{base.get('break_even_orders_per_day', '-')} 单\n\n"
+    section += "### 情景对比\n\n| 情景 | 客单价 | 市场份额 | 月营收 | 月利润 |\n|---|---:|---:|---:|---:|\n"
+    for scenario in scenarios:
+        section += (
+            f"| {scenario.get('name', '-')} | ¥{scenario.get('average_ticket', 0):,.0f} | "
+            f"{scenario.get('market_share', 0) * 100:.1f}% | ¥{scenario.get('monthly_revenue', 0):,.0f} | "
+            f"¥{scenario.get('monthly_profit', 0):,.0f} |\n"
+        )
+    section += "\n### 核心假设\n\n"
+    section += f"- 平均客单价：¥{assumptions.get('avg_ticket', 0):,.0f}\n"
+    section += f"- 座位数：{assumptions.get('seat_count', '-')}\n"
+    section += f"- 日固定成本：¥{assumptions.get('daily_fixed_cost', 0):,.0f}\n"
+    section += f"- 变动成本率：{assumptions.get('variable_cost_rate', 0) * 100:.0f}%\n"
+    section += "- 使用真实 POS、租金、人工、菜单毛利后必须重新校准。\n"
+    return section
+
+
 def _build_basic_summary(state: AgentState) -> str:
     """构建基础总结"""
     return """
-## 八、综合建议
+## 九、综合建议
 
 基于以上分析，建议关注以下方面：
 
@@ -319,6 +363,11 @@ async def _generate_llm_summary(state: AgentState, llm) -> str:
         w = weather.current.get('weather', '')
         context_parts.append(f"天气: {w}")
     
+    simulation = state.get("revenue_simulation") or {}
+    base = simulation.get("base_revenue") or {}
+    if base:
+        context_parts.append(f"情景模拟月营收: {base.get('monthly_revenue')}，月利润: {base.get('monthly_profit')}")
+
     context = "\n".join(context_parts)
     
     prompt = f"""基于以下餐饮店铺分析数据，请生成一份专业的经营建议总结（200-300字）：
@@ -331,7 +380,8 @@ async def _generate_llm_summary(state: AgentState, llm) -> str:
 3. 运营优化方向
 4. 风险提示与应对措施
 
-使用 Markdown 格式输出，以"## 八、综合建议"作为标题。"""
+不得把情景模拟数字表述为真实预测或承诺。
+使用 Markdown 格式输出，以"## 九、综合建议"作为标题。"""
 
     try:
         response = await llm.ainvoke(prompt)

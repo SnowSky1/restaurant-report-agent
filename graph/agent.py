@@ -17,6 +17,7 @@ from nodes.poi import poi_node
 from nodes.chart import chart_node
 from nodes.report import report_node
 from nodes.competition_analysis import competition_analysis_node
+from nodes.revenue_simulation import revenue_simulation_node
 
 
 def create_agent_graph(
@@ -32,7 +33,9 @@ def create_agent_graph(
     1. location - 位置解析
     2. parallel_data - 并行数据采集（竞争对手/交通/天气/POI）
     3. competition_analysis - 深度竞争分析（可选）
-    4. report - 报告生成
+    4. revenue_simulation - 多智能体定价/营收情景模拟
+    5. chart - 图表数据生成
+    6. report - 报告生成
     
     Args:
         amap_tools: 高德地图工具实例
@@ -84,6 +87,8 @@ def create_agent_graph(
                 errors.append(str(r))
         
         merged["errors"] = errors
+        if hasattr(amap_tools, "provenance"):
+            merged["provenance"] = amap_tools.provenance()
         print("✓ 数据采集完成")
         
         return merged
@@ -95,10 +100,17 @@ def create_agent_graph(
     async def _competition_analysis_node(state: AgentState) -> dict:
         """深度竞争分析节点包装"""
         return await competition_analysis_node(state, llm)
+
+    async def _revenue_simulation_node(state: AgentState) -> dict:
+        """CompeteAI-inspired multi-agent market simulation."""
+        return await revenue_simulation_node(state)
     
     async def _report_node(state: AgentState) -> dict:
-        """报告生成节点包装"""
-        return await report_node(state, llm)
+        """报告生成节点包装；一次工作流至多进行一次 LLM 调用。"""
+        # 深度分析已经让 LLM 解释过竞争证据，报告阶段复用结构化
+        # 结果并采用确定性总结，避免重复调用将接口时延放大一倍。
+        report_llm = None if enable_competition_analysis else llm
+        return await report_node(state, report_llm)
     
     # 创建工作流图
     workflow = StateGraph(AgentState)
@@ -106,6 +118,8 @@ def create_agent_graph(
     # 添加节点
     workflow.add_node("location", _location_node)
     workflow.add_node("parallel_data", _parallel_data_node)
+    workflow.add_node("revenue_simulation", _revenue_simulation_node)
+    workflow.add_node("chart", _chart_node)
     workflow.add_node("report", _report_node)
     
     # 设置入口点
@@ -117,14 +131,15 @@ def create_agent_graph(
     # 根据是否启用深度分析，决定工作流路径
     if enable_competition_analysis:
         workflow.add_node("competition_analysis", _competition_analysis_node)
-        # 并行数据采集 -> 深度竞争分析 -> 报告生成
+        # 并行数据采集 -> 深度竞争分析 -> 营收模拟
         workflow.add_edge("parallel_data", "competition_analysis")
-        workflow.add_edge("competition_analysis", "report")
+        workflow.add_edge("competition_analysis", "revenue_simulation")
     else:
-        # 并行数据采集 -> 报告生成
-        workflow.add_edge("parallel_data", "report")
-    
-    # 报告生成 -> 结束
+        workflow.add_edge("parallel_data", "revenue_simulation")
+
+    # 恢复历史确认过但后来丢失的 chart -> report 路径
+    workflow.add_edge("revenue_simulation", "chart")
+    workflow.add_edge("chart", "report")
     workflow.add_edge("report", END)
     
     # 编译工作流
@@ -171,6 +186,16 @@ LangGraph 工作流结构（含深度分析）:
              │
              ▼
     ┌─────────────────┐
+    │ revenue_simulat.│  定价/营收多智能体模拟
+    └────────┬────────┘
+             │
+             ▼
+    ┌─────────────────┐
+    │      chart      │  图表数据生成
+    └────────┬────────┘
+             │
+             ▼
+    ┌─────────────────┐
     │     report      │  报告生成
     └────────┬────────┘
              │
@@ -199,6 +224,16 @@ LangGraph 工作流结构:
     │  │ asyncio   │  │  ├── traffic
     │  │ .gather() │  │  ├── weather
     │  └───────────┘  │  └── poi
+    └────────┬────────┘
+             │
+             ▼
+    ┌─────────────────┐
+    │ revenue_simulat.│  定价/营收情景模拟
+    └────────┬────────┘
+             │
+             ▼
+    ┌─────────────────┐
+    │      chart      │  图表数据生成
     └────────┬────────┘
              │
              ▼

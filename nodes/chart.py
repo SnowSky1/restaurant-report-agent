@@ -33,11 +33,15 @@ async def chart_node(state: AgentState, chart_tools: Any = None) -> dict:
     
     # 交通评分雷达图数据
     traffic_chart = _build_traffic_chart(state.get("traffic"))
+
+    # 营收情景对比
+    revenue_chart = _build_revenue_chart(state.get("revenue_simulation"))
     
     chart_data = ChartData(
         competitor_chart=competitor_chart,
         poi_chart=poi_chart,
-        traffic_chart=traffic_chart
+        traffic_chart=traffic_chart,
+        revenue_chart=revenue_chart,
     )
     
     print(f"✓ 图表数据生成完成")
@@ -123,3 +127,17 @@ def _build_traffic_chart(traffic) -> dict:
         "data": radar_data,
         "max": 10
     }
+
+
+def _build_revenue_chart(simulation) -> dict:
+    """Build a scenario revenue/profit comparison chart."""
+    if not simulation:
+        return {"type": "bar", "data": [], "title": "营收情景模拟"}
+    data = []
+    for scenario in simulation.get("scenario_simulations", []):
+        data.append({
+            "name": scenario.get("name", scenario.get("id", "情景")),
+            "revenue": scenario.get("monthly_revenue", 0),
+            "profit": scenario.get("monthly_profit", 0),
+        })
+    return {"type": "bar", "data": data, "title": "月度营收与利润情景模拟"}

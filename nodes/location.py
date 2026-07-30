@@ -1,75 +1,82 @@
-"""
-位置解析节点
+"""Resolve an address or user-selected coordinates into a location."""
 
-负责将店铺地址转换为经纬度坐标，并获取商圈信息
-"""
+from __future__ import annotations
 
 from typing import Any
+
 from .state import AgentState, LocationInfo
 
 
+def _string_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return next((str(item) for item in value if item), "")
+    return str(value) if value else ""
+
+
 async def location_node(state: AgentState, amap_tools: Any) -> dict:
-    """
-    位置解析节点
-    
-    1. 地理编码：地址 -> 坐标
-    2. 逆地理编码：获取商圈等详细信息
-    
-    Args:
-        state: 当前状态
-        amap_tools: 高德地图工具实例
-        
-    Returns:
-        dict: 更新后的状态字段
-    """
-    print(f"📍 正在解析位置: {state['store_address']}")
-    
     errors = list(state.get("errors", []))
-    
+    address = state.get("store_address", "")
+    coordinates = state.get("input_coordinates")
+
     try:
-        # 1. 地理编码
-        geo_result = await amap_tools.geocode(state["store_address"])
-        
-        if geo_result.get("status") != "1" or not geo_result.get("geocodes"):
-            errors.append(f"地理编码失败: {state['store_address']}")
-            return {"errors": errors}
-        
-        geocode = geo_result["geocodes"][0]
-        coordinates = geocode.get("location", "")
-        city = geocode.get("city", "")
-        district = geocode.get("district", "")
-        formatted_address = geocode.get("formatted_address", state["store_address"])
-        
-        # 2. 逆地理编码获取商圈信息
-        business_area = ""
+        source = "unknown"
+        formatted_address = address
+        city = district = business_area = adcode = ""
+
         if coordinates:
-            try:
-                regeo_result = await amap_tools.reverse_geocode(coordinates)
-                if regeo_result.get("status") == "1":
-                    regeocode = regeo_result.get("regeocode", {})
-                    address_component = regeocode.get("addressComponent", {})
-                    business_areas = address_component.get("businessAreas", [])
-                    if business_areas:
-                        business_area = business_areas[0].get("name", "")
-            except Exception as e:
-                print(f"⚠️ 逆地理编码失败: {e}")
-        
-        location_info = LocationInfo(
-            coordinates=coordinates,
-            address=formatted_address,
-            business_area=business_area,
-            district=district,
-            city=city if isinstance(city, str) else ""
-        )
-        
-        print(f"✓ 位置解析完成: {coordinates} ({business_area or district})")
-        
+            regeo = await amap_tools.reverse_geocode(coordinates)
+            source = regeo.get("_meta", {}).get("source", "unknown")
+            regeocode = regeo.get("regeocode", {})
+            component = regeocode.get("addressComponent", {})
+            formatted_address = regeocode.get("formatted_address") or address
+            city = _string_value(component.get("city") or component.get("province"))
+            district = _string_value(component.get("district"))
+            adcode = _string_value(component.get("adcode"))
+            areas = component.get("businessAreas") or []
+            if areas:
+                business_area = areas[0].get("name", "")
+        else:
+            result = await amap_tools.geocode(address)
+            source = result.get("_meta", {}).get("source", "unknown")
+            geocodes = result.get("geocodes") or []
+            if not geocodes:
+                raise ValueError(f"无法解析地址：{address}")
+            geocode = geocodes[0]
+            coordinates = geocode.get("location", "")
+            formatted_address = geocode.get("formatted_address") or address
+            city = _string_value(geocode.get("city") or geocode.get("province"))
+            district = _string_value(geocode.get("district"))
+            business_area = _string_value(geocode.get("business_area"))
+            adcode = _string_value(geocode.get("adcode"))
+
+            if coordinates and (not business_area or not adcode):
+                regeo = await amap_tools.reverse_geocode(coordinates)
+                regeocode = regeo.get("regeocode", {})
+                component = regeocode.get("addressComponent", {})
+                city = city or _string_value(component.get("city") or component.get("province"))
+                district = district or _string_value(component.get("district"))
+                adcode = adcode or _string_value(component.get("adcode"))
+                areas = component.get("businessAreas") or []
+                if not business_area and areas:
+                    business_area = areas[0].get("name", "")
+
+        if not coordinates:
+            raise ValueError("位置服务没有返回坐标")
+
         return {
-            "location": location_info,
-            "errors": errors
+            "location": LocationInfo(
+                coordinates=coordinates,
+                address=formatted_address,
+                business_area=business_area,
+                district=district,
+                city=city,
+                adcode=adcode,
+                source=source,
+            ),
+            "errors": errors,
         }
-        
-    except Exception as e:
-        errors.append(f"位置解析异常: {str(e)}")
-        print(f"❌ 位置解析失败: {e}")
-        return {"errors": errors}
+    except Exception as error:
+        errors.append(f"位置解析失败：{error}")
+        return {"location": None, "errors": errors}

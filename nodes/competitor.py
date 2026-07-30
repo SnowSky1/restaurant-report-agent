@@ -1,94 +1,72 @@
-"""
-竞争对手分析节点
+"""Nearby competitor discovery."""
 
-搜索周边同类型店铺，分析竞争态势
-"""
+from __future__ import annotations
 
-from typing import Any, List
+from typing import Any
+
 from .state import AgentState, CompetitorInfo
 
 
-# 店铺类型到搜索关键词的映射
-STORE_TYPE_KEYWORDS = {
-    "餐厅": "餐饮|中餐|餐厅",
-    "咖啡店": "咖啡|咖啡厅|咖啡馆",
-    "奶茶店": "奶茶|茶饮|饮品",
-    "火锅店": "火锅",
-    "烧烤店": "烧烤|烤肉",
-    "快餐店": "快餐|简餐",
-    "面馆": "面馆|面食|拉面",
-    "西餐厅": "西餐|牛排|意大利",
-    "日料店": "日料|日本料理|寿司",
-    "韩餐厅": "韩餐|韩国料理|烤肉",
-    "川菜馆": "川菜",
-    "粤菜馆": "粤菜|广东菜",
-    "甜品店": "甜品|蛋糕|甜点",
-    "面包店": "面包|烘焙|蛋糕",
+STORE_SEARCH = {
+    "餐厅": ("餐饮", "050000"),
+    "咖啡店": ("咖啡", "050500"),
+    "奶茶店": ("奶茶|茶饮|饮品", "050700"),
+    "火锅店": ("火锅", "050000"),
+    "烧烤店": ("烧烤|烤肉", "050000"),
+    "快餐店": ("快餐|简餐", "050300"),
+    "面馆": ("面馆|面食|拉面", "050000"),
+    "西餐厅": ("西餐|牛排|意大利", "050200"),
+    "日料店": ("日料|日本料理|寿司", "050200"),
+    "韩餐厅": ("韩餐|韩国料理|烤肉", "050200"),
+    "川菜馆": ("川菜", "050000"),
+    "粤菜馆": ("粤菜|广东菜", "050000"),
+    "甜品店": ("甜品|蛋糕|甜点", "050900"),
+    "面包店": ("面包|烘焙|蛋糕", "050800"),
 }
 
 
 async def competitor_node(state: AgentState, amap_tools: Any) -> dict:
-    """
-    竞争对手分析节点
-    
-    搜索周边同类型店铺，提取竞争对手信息
-    
-    Args:
-        state: 当前状态
-        amap_tools: 高德地图工具实例
-        
-    Returns:
-        dict: 包含竞争对手列表的状态更新
-    """
-    print(f"🏪 正在分析竞争对手...")
-    
     errors = list(state.get("errors", []))
-    competitors: List[CompetitorInfo] = []
-    
     location = state.get("location")
-    if not location or not location.coordinates:
+    if not location:
         errors.append("缺少位置信息，无法分析竞争对手")
-        return {"competitors": competitors, "errors": errors}
-    
+        return {"competitors": [], "errors": errors}
+
     try:
-        # 获取搜索关键词
         store_type = state.get("store_type", "餐厅")
-        keywords = STORE_TYPE_KEYWORDS.get(store_type, "餐饮")
-        radius = state.get("analysis_radius", 1000)
-        
-        # 搜索周边同类店铺
-        search_result = await amap_tools.search_around(
+        keywords, typecode = STORE_SEARCH.get(store_type, STORE_SEARCH["餐厅"])
+        result = await amap_tools.search_around(
             location=location.coordinates,
             keywords=keywords,
-            radius=radius
+            types=typecode,
+            radius=state.get("analysis_radius", 1000),
+            page_size=25,
         )
-        
-        pois = search_result.get("pois", [])
-        
-        for poi in pois[:20]:  # 最多取前 20 个
-            # 提取评分
-            biz_ext = poi.get("biz_ext", {})
-            rating = ""
-            if isinstance(biz_ext, dict):
-                rating = biz_ext.get("rating", "")
-            
-            competitor = CompetitorInfo(
-                name=poi.get("name", ""),
-                distance=poi.get("distance", ""),
-                address=poi.get("address", ""),
-                rating=rating,
-                type=poi.get("type", "")
+        source = result.get("_meta", {}).get("source", "unknown")
+        store_name = state.get("store_name", "").replace(" ", "").lower()
+        competitors: list[CompetitorInfo] = []
+        for poi in result.get("pois") or []:
+            name = str(poi.get("name") or "")
+            if not name:
+                continue
+            normalized_name = name.replace(" ", "").lower()
+            if store_name and (normalized_name == store_name or store_name in normalized_name):
+                continue
+            biz_ext = poi.get("biz_ext") if isinstance(poi.get("biz_ext"), dict) else {}
+            competitors.append(
+                CompetitorInfo(
+                    name=name,
+                    distance=str(poi.get("distance") or ""),
+                    address=str(poi.get("address") or ""),
+                    rating=str(biz_ext.get("rating") or ""),
+                    type=str(poi.get("type") or ""),
+                    typecode=str(poi.get("typecode") or ""),
+                    location=str(poi.get("location") or ""),
+                    average_cost=str(biz_ext.get("cost") or ""),
+                    source=source,
+                )
             )
-            competitors.append(competitor)
-        
-        print(f"✓ 发现 {len(competitors)} 家竞争对手")
-        
-        return {
-            "competitors": competitors,
-            "errors": errors
-        }
-        
-    except Exception as e:
-        errors.append(f"竞争对手分析异常: {str(e)}")
-        print(f"❌ 竞争对手分析失败: {e}")
-        return {"competitors": competitors, "errors": errors}
+        return {"competitors": competitors[:20], "errors": errors}
+    except Exception as error:
+        errors.append(f"竞争对手分析失败：{error}")
+        return {"competitors": [], "errors": errors}

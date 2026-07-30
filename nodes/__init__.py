@@ -7,6 +7,7 @@ from .poi import poi_node
 from .chart import chart_node
 from .report import report_node
 from .competition_analysis import CompetitionAnalyzer, competition_analysis_node
+from .revenue_simulation import revenue_simulation_node, simulate_market
 
 __all__ = [
     "AgentState",
@@ -26,5 +27,6 @@ __all__ = [
     "report_node",
     "CompetitionAnalyzer",
     "competition_analysis_node",
+    "revenue_simulation_node",
+    "simulate_market",
 ]
-

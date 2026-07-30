@@ -1,263 +1,214 @@
-"""
-深度竞争分析节点
+"""CompeteAI-inspired competitive analysis.
 
-基于 CompeteAI 理论框架，使用 LLM 进行深度竞争态势分析
+This module is deliberately transparent: deterministic market indicators are
+computed first, then an LLM may enrich the explanation.  The multi-round
+consumer/restaurant simulation lives in ``revenue_simulation.py``.
 """
+
+from __future__ import annotations
 
 import json
-from typing import Any, List, Optional
+from statistics import mean
+from typing import Any
+
 from .state import AgentState
 
 
 class CompetitionAnalyzer:
-    """
-    竞争分析器
-    
-    基于 CompeteAI (ICML 2024) 理论框架，分析竞争态势
-    """
-    
-    def __init__(self, llm: Any):
+    def __init__(self, llm: Any | None = None):
         self.llm = llm
-    
-    async def analyze_competition_dynamics(
-        self,
-        store_name: str,
-        store_type: str,
-        store_address: str,
-        competitors: List[Any],
-        business_env: Any
-    ) -> dict:
-        """
-        分析竞争动态
-        
-        Args:
-            store_name: 店铺名称
-            store_type: 店铺类型
-            store_address: 店铺地址
-            competitors: 竞争对手列表
-            business_env: 商业环境信息
-            
-        Returns:
-            dict: 结构化的竞争分析结果
-        """
-        # 格式化竞争对手信息
-        competitors_text = self._format_competitors(competitors)
-        
-        # 格式化商业环境信息
-        env_text = self._format_business_env(business_env)
-        
-        # 构建分析 prompt
-        prompt = f"""你是一位专业的商业分析师，请基于以下信息对店铺进行深度竞争分析。
 
-## 店铺信息
-- 名称: {store_name}
-- 类型: {store_type}
-- 地址: {store_address}
+    async def analyze(self, state: AgentState) -> dict[str, Any]:
+        baseline = self._baseline_analysis(state)
+        if not self.llm:
+            baseline["llm_status"] = "not_configured"
+            return baseline
 
-## 竞争对手信息
-{competitors_text}
-
-## 商业环境
-{env_text}
-
-请按照以下 JSON 格式输出分析结果（仅输出 JSON，不要其他内容）：
-
-{{
-    "competition_intensity": {{
-        "level": "高/中/低",
-        "score": 1-10,
-        "description": "竞争强度说明"
-    }},
-    "market_position": {{
-        "recommended": "建议的市场定位",
-        "differentiation": "差异化方向",
-        "target_segment": "目标客群"
-    }},
-    "competitive_advantages": [
-        "优势1",
-        "优势2"
-    ],
-    "competitive_threats": [
-        {{
-            "threat": "威胁描述",
-            "source": "威胁来源",
-            "severity": "高/中/低"
-        }}
-    ],
-    "differentiation_opportunities": [
-        {{
-            "opportunity": "机会描述",
-            "implementation": "实施建议"
-        }}
-    ],
-    "pricing_strategy": {{
-        "current_assessment": "当前定价评估",
-        "recommendation": "定价建议"
-    }},
-    "scenario_analysis": {{
-        "optimistic": "乐观情景预测",
-        "baseline": "基准情景预测",
-        "pessimistic": "悲观情景预测"
-    }},
-    "future_prediction": {{
-        "short_term": "短期预测（1-3个月）",
-        "medium_term": "中期预测（3-6个月）",
-        "long_term": "长期预测（6-12个月）"
-    }},
-    "action_plan": [
-        {{
-            "priority": 1,
-            "action": "行动描述",
-            "timeline": "时间框架",
-            "expected_roi": "预期回报"
-        }}
-    ]
-}}"""
-
+        prompt = self._build_prompt(state, baseline)
         try:
             response = await self.llm.ainvoke(prompt)
-            content = response.content if hasattr(response, 'content') else str(response)
-            
-            # 尝试解析 JSON
-            # 处理可能的 markdown 代码块包装
-            content = content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
-            
-            result = json.loads(content)
-            return result
-            
-        except json.JSONDecodeError as e:
-            print(f"⚠️ JSON 解析失败: {e}")
-            return self._get_default_analysis()
-        except Exception as e:
-            print(f"⚠️ LLM 调用失败: {e}")
-            return self._get_default_analysis()
-    
-    def _format_competitors(self, competitors: List[Any]) -> str:
-        """格式化竞争对手信息"""
-        if not competitors:
-            return "暂无竞争对手数据"
-        
-        lines = []
-        for i, comp in enumerate(competitors[:10], 1):
-            if hasattr(comp, 'name'):
-                # dataclass 对象
-                name = comp.name
-                distance = comp.distance
-                rating = comp.rating or "无评分"
-            elif isinstance(comp, dict):
-                name = comp.get('name', '未知')
-                distance = comp.get('distance', '?')
-                rating = comp.get('rating', '无评分')
-            else:
-                continue
-            lines.append(f"{i}. {name} - 距离{distance}米 - 评分{rating}")
-        
-        return "\n".join(lines) if lines else "暂无竞争对手数据"
-    
-    def _format_business_env(self, business_env: Any) -> str:
-        """格式化商业环境信息"""
-        if not business_env:
-            return "暂无商业环境数据"
-        
-        # 处理 POIAnalysis dataclass
-        if hasattr(business_env, 'poi_counts'):
-            poi_counts = business_env.poi_counts
-            poi_summary = business_env.poi_summary
-            lines = [f"- {k}: {v}个" for k, v in poi_counts.items()]
-            lines.append(f"\n总结: {poi_summary}")
-            return "\n".join(lines)
-        
-        # 处理字典
-        if isinstance(business_env, dict):
-            poi_counts = business_env.get('poi_counts', {})
-            if poi_counts:
-                lines = [f"- {k}: {v}个" for k, v in poi_counts.items()]
-                return "\n".join(lines)
-            return str(business_env)
-        
-        return str(business_env)
-    
-    def _get_default_analysis(self) -> dict:
-        """返回默认分析结果"""
+            content = _response_text(response)
+            enriched = _parse_json_object(content)
+            merged = _deep_merge(baseline, enriched)
+            merged["llm_status"] = "success"
+            return merged
+        except Exception as error:
+            baseline["llm_status"] = "fallback"
+            baseline["llm_warning"] = f"LLM 深度解释失败，已保留规则分析：{type(error).__name__}"
+            return baseline
+
+    @staticmethod
+    def _baseline_analysis(state: AgentState) -> dict[str, Any]:
+        competitors = list(state.get("competitors") or [])
+        distances = [_number(getattr(item, "distance", None)) for item in competitors]
+        distances = [value for value in distances if value is not None]
+        ratings = [_number(getattr(item, "rating", None)) for item in competitors]
+        ratings = [value for value in ratings if value is not None]
+        costs = [_number(getattr(item, "average_cost", None)) for item in competitors]
+        costs = [value for value in costs if value and value > 0]
+
+        nearby = sum(1 for value in distances if value <= 300)
+        count_factor = min(len(competitors) / 15, 1)
+        nearby_factor = min(nearby / 5, 1)
+        rating_factor = min((mean(ratings) if ratings else 4.0) / 5, 1)
+        score = round(10 * (0.5 * count_factor + 0.3 * nearby_factor + 0.2 * rating_factor), 1)
+        level = "高" if score >= 7 else "中" if score >= 4 else "低"
+
+        poi = state.get("poi_analysis")
+        counts = getattr(poi, "poi_counts", {}) if poi else {}
+        main_segment = max(counts, key=counts.get) if counts else "综合客群"
+        positioning = {
+            "写字楼": ("高效率商务餐饮", "工作日午餐、会议茶歇和企业团餐"),
+            "住宅": ("社区复购型门店", "家庭、晚餐和外卖客群"),
+            "商场": ("体验与社交型门店", "周末、约会和休闲消费"),
+            "学校": ("高性价比快周转门店", "学生和年轻客群"),
+            "医院": ("稳定便捷型门店", "医务、陪护和周边居民"),
+        }
+        recommended, target = positioning.get(main_segment, ("差异化社区门店", "周边稳定客群"))
+
+        price_low = round(min(costs) * 0.9, 1) if costs else None
+        price_high = round(max(costs) * 1.1, 1) if costs else None
+        price_text = (
+            f"竞品公开人均约 ¥{min(costs):.0f}–¥{max(costs):.0f}，建议核心产品带控制在 ¥{price_low:.0f}–¥{price_high:.0f} 并做小范围 A/B 测试"
+            if costs
+            else "缺少可靠竞品人均价格；先采集菜单、成本和转化数据，再进行 5%–10% 小步价格测试"
+        )
+
+        threats = []
+        if nearby:
+            threats.append({"threat": f"300 米内有 {nearby} 家近距离竞品", "source": "高德周边 POI", "severity": "高" if nearby >= 4 else "中"})
+        if ratings and mean(ratings) >= 4.5:
+            threats.append({"threat": "竞品平均评分较高，体验门槛高", "source": "高德公开评分", "severity": "中"})
+        if not threats:
+            threats.append({"threat": "样本内直接竞争有限，但仍需现场复核", "source": "当前 POI 样本", "severity": "低"})
+
         return {
+            "framework": "CompeteAI-inspired deterministic + LLM enrichment",
             "competition_intensity": {
-                "level": "中",
-                "score": 5,
-                "description": "竞争态势分析数据不足"
+                "level": level,
+                "score": score,
+                "description": f"检出 {len(competitors)} 家同类门店，其中 {nearby} 家位于 300 米内",
+                "sample_size": len(competitors),
             },
             "market_position": {
-                "recommended": "待定",
-                "differentiation": "需要更多数据分析",
-                "target_segment": "待定"
+                "recommended": recommended,
+                "differentiation": "围绕高频场景建立一个可量化卖点，并通过菜单、时段和会员机制强化复购",
+                "target_segment": target,
             },
-            "competitive_advantages": [],
-            "competitive_threats": [],
-            "differentiation_opportunities": [],
+            "competitive_advantages": [
+                f"可围绕{main_segment}客群设计更精准的产品与时段策略",
+                "基于真实 POI、距离与评分持续监控，而不是只依赖主观判断",
+            ],
+            "competitive_threats": threats,
+            "differentiation_opportunities": [
+                {"opportunity": "时段差异化", "implementation": "分别跟踪早餐、午餐、下午和晚间的订单量与客单价"},
+                {"opportunity": "产品差异化", "implementation": "选取 1–2 个高毛利招牌产品进行四周转化测试"},
+                {"opportunity": "渠道差异化", "implementation": "将堂食、外卖和企业团购拆分核算获客成本与复购"},
+            ],
             "pricing_strategy": {
-                "current_assessment": "待分析",
-                "recommendation": "建议收集更多市场数据"
+                "current_assessment": price_text,
+                "recommendation": "同时观察销量、毛利、复购和竞品响应，禁止只凭 LLM 建议一次性大幅调价",
+                "observed_competitor_costs": costs,
+                "suggested_range": {"low": price_low, "high": price_high},
             },
             "scenario_analysis": {
-                "optimistic": "待分析",
-                "baseline": "待分析",
-                "pessimistic": "待分析"
+                "optimistic": "差异化产品验证成功且复购提升，可在控制履约能力的前提下增加投放",
+                "baseline": "保持价格与服务稳定，通过四周实验逐步优化转化和客单",
+                "pessimistic": "竞品促销导致份额下降，应优先保护高贡献客群并削减低回报折扣",
             },
             "future_prediction": {
-                "short_term": "待分析",
-                "medium_term": "待分析",
-                "long_term": "待分析"
+                "short_term": "1–3 个月重点验证菜单、定价和渠道假设",
+                "medium_term": "3–6 个月根据复购和单位经济性决定是否扩张",
+                "long_term": "6–12 个月建立竞品监控与动态定价治理机制",
             },
-            "action_plan": []
+            "action_plan": [
+                {"priority": 1, "action": "连续四周采集订单、时段、客单、毛利和复购", "timeline": "第 1–4 周", "expected_roi": "形成可验证经营基线"},
+                {"priority": 2, "action": "执行两个价格/套餐 A/B 实验", "timeline": "第 2–6 周", "expected_roi": "找到更优毛利与转化组合"},
+                {"priority": 3, "action": "每月刷新周边竞品与评分", "timeline": "持续", "expected_roi": "提前识别竞争变化"},
+            ],
         }
+
+    @staticmethod
+    def _build_prompt(state: AgentState, baseline: dict[str, Any]) -> str:
+        competitors = []
+        for item in list(state.get("competitors") or [])[:12]:
+            competitors.append({
+                "name": getattr(item, "name", ""),
+                "distance": getattr(item, "distance", ""),
+                "rating": getattr(item, "rating", ""),
+                "average_cost": getattr(item, "average_cost", ""),
+                "type": getattr(item, "type", ""),
+            })
+        poi = state.get("poi_analysis")
+        evidence = {
+            "store": {
+                "name": state.get("store_name"),
+                "type": state.get("store_type"),
+                "address": state.get("store_address"),
+            },
+            "competitors": competitors,
+            "poi_counts": getattr(poi, "poi_counts", {}) if poi else {},
+            "rule_baseline": baseline,
+        }
+        return (
+            "你是餐饮经营策略分析师。请严格基于证据改进下面的规则分析，"
+            "不得捏造客流、营收或成本。保留原有 JSON 键，只输出一个合法 JSON 对象。"
+            "定价建议必须说明它是待验证建议，行动计划必须可执行。\n\n"
+            + json.dumps(evidence, ensure_ascii=False)
+        )
 
 
 async def competition_analysis_node(state: AgentState, llm: Any = None) -> dict:
-    """
-    深度竞争分析节点
-    
-    使用 CompetitionAnalyzer 进行深度分析
-    
-    Args:
-        state: 当前状态
-        llm: LLM 实例
-        
-    Returns:
-        dict: 包含深度分析结果的状态更新
-    """
-    print(f"🔬 正在进行深度竞争分析...")
-    
     errors = list(state.get("errors", []))
-    
-    if not llm:
-        errors.append("深度分析需要 LLM 支持")
-        return {"competition_analysis": None, "errors": errors}
-    
     try:
-        analyzer = CompetitionAnalyzer(llm)
-        
-        analysis_result = await analyzer.analyze_competition_dynamics(
-            store_name=state.get("store_name", ""),
-            store_type=state.get("store_type", "餐厅"),
-            store_address=state.get("store_address", ""),
-            competitors=state.get("competitors", []),
-            business_env=state.get("poi_analysis")
-        )
-        
-        print(f"✓ 深度竞争分析完成")
-        
-        return {
-            "competition_analysis": analysis_result,
-            "errors": errors
-        }
-        
-    except Exception as e:
-        errors.append(f"深度分析异常: {str(e)}")
-        print(f"❌ 深度竞争分析失败: {e}")
+        analysis = await CompetitionAnalyzer(llm).analyze(state)
+        warning = analysis.get("llm_warning")
+        if warning:
+            errors.append(str(warning))
+        return {"competition_analysis": analysis, "errors": errors}
+    except Exception as error:
+        errors.append(f"深度竞争分析失败：{error}")
         return {"competition_analysis": None, "errors": errors}
+
+
+def _number(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _response_text(response: Any) -> str:
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(item.get("text", "")) if isinstance(item, dict) else str(getattr(item, "text", ""))
+            for item in content
+        )
+    return str(content)
+
+
+def _parse_json_object(content: str) -> dict[str, Any]:
+    text = content.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        text = text.rsplit("```", 1)[0]
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("LLM response did not contain JSON")
+    value = json.loads(text[start : end + 1])
+    if not isinstance(value, dict):
+        raise ValueError("LLM JSON root is not an object")
+    return value
+
+
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        elif value not in (None, "", []):
+            result[key] = value
+    return result

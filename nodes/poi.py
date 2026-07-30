@@ -1,129 +1,95 @@
-"""
-POI 分析节点
+"""Nearby commercial-environment analysis."""
 
-分析周边商业环境：写字楼、住宅、学校、商场等
-"""
+from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
+
 from .state import AgentState, POIAnalysis
 
 
-# POI 类型配置
 POI_CATEGORIES = {
-    "写字楼": {"keywords": "写字楼|办公楼", "weight": 0.3},
-    "住宅": {"keywords": "住宅|小区|公寓", "weight": 0.25},
-    "商场": {"keywords": "商场|购物中心|百货", "weight": 0.2},
-    "学校": {"keywords": "学校|大学|中学|小学", "weight": 0.15},
-    "医院": {"keywords": "医院|诊所", "weight": 0.1},
+    "写字楼": {"keywords": "写字楼|办公楼", "types": "120201"},
+    "住宅": {"keywords": "住宅|小区|公寓", "types": "120300"},
+    "商场": {"keywords": "商场|购物中心|百货", "types": "060100"},
+    "学校": {"keywords": "学校|大学|中学|小学", "types": "141200|141201|141202|141203"},
+    "医院": {"keywords": "医院|诊所", "types": "090100|090200"},
 }
 
 
 async def poi_node(state: AgentState, amap_tools: Any) -> dict:
-    """
-    POI 分析节点
-    
-    搜索周边各类 POI，分析商业环境
-    
-    Args:
-        state: 当前状态
-        amap_tools: 高德地图工具实例
-        
-    Returns:
-        dict: 包含 POI 分析结果的状态更新
-    """
-    print(f"🏢 正在分析周边商业环境...")
-    
     errors = list(state.get("errors", []))
-    
     location = state.get("location")
-    if not location or not location.coordinates:
-        errors.append("缺少位置信息，无法分析 POI")
+    if not location:
+        errors.append("缺少位置信息，无法分析商业环境")
         return {"poi_analysis": None, "errors": errors}
-    
-    coordinates = location.coordinates
+
     radius = state.get("analysis_radius", 1000)
-    
-    poi_counts: Dict[str, int] = {}
-    poi_details: List[dict] = []
-    
-    # 搜索各类 POI
-    for category, config in POI_CATEGORIES.items():
-        try:
-            result = await amap_tools.search_around(
-                location=coordinates,
-                keywords=config["keywords"],
-                radius=radius
-            )
-            pois = result.get("pois", [])
-            poi_counts[category] = len(pois)
-            
-            # 保存前 5 个详情
-            for poi in pois[:5]:
-                poi_details.append({
+    combined_types = "|".join(config["types"] for config in POI_CATEGORIES.values())
+    try:
+        result = await amap_tools.search_around(
+            location=location.coordinates,
+            types=combined_types,
+            radius=radius,
+            page_size=25,
+        )
+        rows = list(result.get("pois") or [])
+        source = result.get("_meta", {}).get("source", "unknown")
+    except Exception as error:
+        errors.append(f"商业环境 POI 搜索失败：{error}")
+        rows = []
+        source = "unknown"
+
+    counts: dict[str, int] = {category: 0 for category in POI_CATEGORIES}
+    details: list[dict[str, Any]] = []
+    for poi in rows:
+        category = _poi_category(str(poi.get("typecode") or ""), str(poi.get("type") or ""))
+        if not category:
+            continue
+        counts[category] += 1
+        if sum(1 for item in details if item["category"] == category) < 5:
+            details.append({
                     "category": category,
                     "name": poi.get("name", ""),
-                    "distance": poi.get("distance", ""),
-                    "type": poi.get("type", "")
+                    "distance": str(poi.get("distance") or ""),
+                    "type": poi.get("type", ""),
+                    "location": poi.get("location", ""),
+                    "source": source,
                 })
-                
-        except Exception as e:
-            print(f"⚠️ {category} POI 搜索失败: {e}")
-            poi_counts[category] = 0
-    
-    # 生成分析总结
-    poi_summary = _generate_poi_summary(poi_counts, state.get("store_type", "餐厅"))
-    
-    poi_analysis = POIAnalysis(
-        poi_counts=poi_counts,
-        poi_details=poi_details,
-        poi_summary=poi_summary
-    )
-    
-    total_pois = sum(poi_counts.values())
-    print(f"✓ POI 分析完成: 共发现 {total_pois} 个相关 POI")
-    
+
     return {
-        "poi_analysis": poi_analysis,
-        "errors": errors
+        "poi_analysis": POIAnalysis(
+            poi_counts=counts,
+            poi_details=details,
+            poi_summary=_generate_poi_summary(counts),
+        ),
+        "errors": errors,
     }
 
 
-def _generate_poi_summary(poi_counts: Dict[str, int], store_type: str) -> str:
-    """生成 POI 分析总结"""
-    if not poi_counts:
-        return "周边 POI 信息不足"
-    
-    total = sum(poi_counts.values())
+def _poi_category(typecode: str, type_name: str) -> str | None:
+    if "120201" in typecode or "写字楼" in type_name:
+        return "写字楼"
+    if typecode.startswith("1203") or "住宅区" in type_name:
+        return "住宅"
+    if typecode.startswith("0601") or "商场" in type_name or "购物中心" in type_name:
+        return "商场"
+    if typecode.startswith("1412") or "学校" in type_name:
+        return "学校"
+    if typecode.startswith("090") or "医院" in type_name or "诊所" in type_name:
+        return "医院"
+    return None
+
+
+def _generate_poi_summary(counts: dict[str, int]) -> str:
+    total = sum(counts.values())
     if total == 0:
-        return "周边商业设施较少"
-    
-    # 找出主要 POI 类型
-    sorted_pois = sorted(poi_counts.items(), key=lambda x: x[1], reverse=True)
-    main_type = sorted_pois[0][0] if sorted_pois else "综合"
-    main_count = sorted_pois[0][1] if sorted_pois else 0
-    
-    parts = []
-    
-    # 主要类型分析
-    if main_type == "写字楼" and main_count > 0:
-        parts.append(f"周边以写字楼为主（{main_count}栋），工作日午餐/下午茶需求大")
-        parts.append("建议关注商务套餐和工作日促销")
-    elif main_type == "住宅" and main_count > 0:
-        parts.append(f"周边住宅区密集（{main_count}个小区），家庭消费潜力大")
-        parts.append("建议关注家庭套餐和外卖服务")
-    elif main_type == "商场" and main_count > 0:
-        parts.append(f"周边商场较多（{main_count}个），周末客流量大")
-        parts.append("建议关注周末活动和休闲消费")
-    elif main_type == "学校" and main_count > 0:
-        parts.append(f"周边学校较多（{main_count}所），学生群体消费活跃")
-        parts.append("建议关注性价比和学生优惠")
-    
-    # 综合评价
-    if total >= 20:
-        parts.append("商业环境成熟，客流量有保障")
-    elif total >= 10:
-        parts.append("商业环境一般，需要特色经营")
-    else:
-        parts.append("商业环境待发展，需重点拓展外卖")
-    
-    return "；".join(parts)
+        return "当前数据源没有检出周边配套，请结合现场踏勘复核"
+    main_type, main_count = max(counts.items(), key=lambda item: item[1])
+    suggestions = {
+        "写字楼": "工作日午餐与下午茶需求更突出，可设计高周转商务套餐",
+        "住宅": "家庭与晚间消费潜力较高，应加强外卖和家庭套餐",
+        "商场": "休闲和周末客流更集中，适合联名活动与到店体验",
+        "学校": "学生客群更重视性价比、出餐速度与社交属性",
+        "医院": "陪护与医务客群偏好稳定、清淡和便捷的供给",
+    }
+    return f"本次采样共 {total} 个周边设施，以{main_type}最多（{main_count}个）；{suggestions.get(main_type, '建议继续现场验证客群结构')}"

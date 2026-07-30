@@ -31,6 +31,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.markdown import Markdown
 
 from config.settings import settings
+from services.llm import build_llm
 from tools.amap_tools import AmapTools
 from tools.chart_tools import ChartTools
 from graph.agent import create_agent_graph
@@ -44,22 +45,8 @@ console = Console()
 
 
 def get_llm():
-    """获取 LLM 实例"""
-    llm_config = settings.get_llm_config()
-    
-    if llm_config["provider"] == "openai":
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            api_key=llm_config["api_key"],
-            model=llm_config["model"],
-        )
-    else:  # deepseek 或 siliconflow (兼容 OpenAI API)
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            api_key=llm_config["api_key"],
-            base_url=llm_config["base_url"],
-            model=llm_config["model"],
-        )
+    """Build the configured LLM with the optional Krill fallback."""
+    return build_llm(settings)
 
 
 async def run_analysis(
@@ -70,7 +57,13 @@ async def run_analysis(
     output_file: str = None,
     use_llm: bool = True,
     deep_analysis: bool = False,
-    location: str = None
+    location: str = None,
+    avg_ticket: float = None,
+    seat_count: int = None,
+    daily_fixed_cost: float = None,
+    variable_cost_rate: float = None,
+    save_report: bool = True,
+    display_report: bool = True,
 ) -> tuple[str, dict]:
     """
     运行店铺经营分析
@@ -98,7 +91,9 @@ async def run_analysis(
     ))
     
     # 验证配置
-    errors = settings.validate_config()
+    # LLM enhancement is optional. A missing primary must not prevent the
+    # configured Krill fallback or the deterministic report from running.
+    errors = settings.validate_config(require_llm=False)
     if errors:
         for error in errors:
             console.print(f"[red]❌ 配置错误: {error}[/red]")
@@ -108,7 +103,10 @@ async def run_analysis(
     # 初始化工具
     amap_tools = AmapTools(
         mcp_url=settings.amap_mcp_url,
-        api_key=settings.amap_maps_api_key
+        api_key=settings.amap_maps_api_key,
+        data_mode=settings.data_mode,
+        transport=settings.amap_transport,
+        timeout=settings.request_timeout_seconds,
     )
     
     chart_tools = ChartTools(
@@ -120,9 +118,22 @@ async def run_analysis(
     if use_llm:
         try:
             llm = get_llm()
-            console.print(f"[green]✓ LLM 已加载 ({settings.llm_provider})[/green]")
+            if llm:
+                console.print(f"[green]✓ LLM 已加载 ({settings.llm_provider})[/green]")
+            else:
+                console.print("[yellow]⚠ 未配置 LLM，将使用规则分析和模板报告[/yellow]")
         except Exception as e:
             console.print(f"[yellow]⚠ LLM 加载失败: {e}[/yellow]")
+
+    try:
+        await amap_tools.initialize()
+    except Exception as error:
+        if settings.data_mode == "real":
+            console.print(f"[red]❌ 数据服务初始化失败: {error}[/red]")
+            await amap_tools.close()
+            await chart_tools.close()
+            return "", {}
+        console.print(f"[yellow]⚠ 数据服务初始化失败，将按 auto 模式回退: {error}[/yellow]")
     
     # 创建工作流
     graph = create_agent_graph(
@@ -137,7 +148,12 @@ async def run_analysis(
         store_name=store_name,
         store_address=store_address,
         store_type=store_type,
-        analysis_radius=analysis_radius
+        analysis_radius=analysis_radius,
+        input_coordinates=location,
+        avg_ticket=avg_ticket,
+        seat_count=seat_count,
+        daily_fixed_cost=daily_fixed_cost,
+        variable_cost_rate=variable_cost_rate,
     )
     
     # 增加对传入 location 的处理支持
@@ -151,10 +167,6 @@ async def run_analysis(
     ) as progress:
         task = progress.add_task("[cyan]正在分析...", total=None)
         
-        # 如果用户直接传入了 location (经纬度)
-        if location:
-            initial_state["location"] = {"coordinates": location, "address": store_address, "business_area": ""}
-            
         try:
             # 执行工作流
             progress.update(task, description="[cyan]📍 解析店铺位置...")
@@ -175,15 +187,16 @@ async def run_analysis(
     
     if not report:
         console.print("[red]❌ 报告生成失败[/red]")
-        if errors:
+        if final_state.get("errors"):
             for error in final_state["errors"]:
                 console.print(f"  - {error}")
         return "", final_state
     
     # 保存报告
+    output_path = None
     if output_file:
         output_path = Path(output_file)
-    else:
+    elif save_report:
         # 默认保存到 reports 目录
         output_dir = Path(settings.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -195,17 +208,19 @@ async def run_analysis(
         output_path = output_dir / f"{safe_name}_{timestamp}.md"
     
     # 增加确保 output_dir 存在的方法，因为如果是命令行运行可能路径不存在
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(report, encoding="utf-8")
-    console.print(f"\n[green]✓ 报告已保存到: {output_path}[/green]")
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(report, encoding="utf-8")
+        console.print(f"\n[green]✓ 报告已保存到: {output_path}[/green]")
     
     # 显示报告预览
-    console.print("\n")
-    console.print(Panel(
-        Markdown(report[:2000] + "\n\n..." if len(report) > 2000 else report),
-        title="[bold]报告预览[/bold]",
-        border_style="blue"
-    ))
+    if display_report:
+        console.print("\n")
+        console.print(Panel(
+            Markdown(report[:2000] + "\n\n..." if len(report) > 2000 else report),
+            title="[bold]报告预览[/bold]",
+            border_style="blue"
+        ))
     
     # 将 final_state 一并返回给 API 使用
     return report, final_state
@@ -265,6 +280,11 @@ def main():
         action="store_true",
         help="启用深度竞争分析 (自研 CompeteAI 理论框架)"
     )
+
+    parser.add_argument("--avg-ticket", type=float, help="模拟使用的平均客单价（元）")
+    parser.add_argument("--seat-count", type=int, help="模拟使用的座位数")
+    parser.add_argument("--daily-fixed-cost", type=float, help="模拟使用的日固定成本（元）")
+    parser.add_argument("--variable-cost-rate", type=float, help="模拟使用的变动成本率，如 0.4")
     
     args = parser.parse_args()
     
@@ -276,7 +296,11 @@ def main():
         analysis_radius=args.radius,
         output_file=args.output,
         use_llm=not args.no_llm,
-        deep_analysis=args.deep_analysis
+        deep_analysis=args.deep_analysis,
+        avg_ticket=args.avg_ticket,
+        seat_count=args.seat_count,
+        daily_fixed_cost=args.daily_fixed_cost,
+        variable_cost_rate=args.variable_cost_rate,
     ))
 
 

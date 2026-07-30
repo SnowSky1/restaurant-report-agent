@@ -1,0 +1,5 @@
+"""Service adapters used by the application."""
+
+from .llm import build_llm
+
+__all__ = ["build_llm"]
