@@ -17,6 +17,12 @@ export function Navbar() {
             首页
           </Link>
           <Link
+            href="/compare"
+            className="text-sm font-medium text-system-gray hover:text-foreground transition-colors"
+          >
+            候选点比较
+          </Link>
+          <Link
             href="/reports/overview"
             className="text-sm font-medium text-system-gray hover:text-foreground transition-colors"
           >

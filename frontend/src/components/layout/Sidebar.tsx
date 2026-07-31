@@ -10,9 +10,11 @@ import {
   CloudSun,
   FileText,
   Settings,
+  Scale,
 } from "lucide-react";
 
 const navigation = [
+  { name: "候选点决策", href: "/compare", icon: Scale },
   { name: "总览报告", href: "/reports/overview", icon: FileText },
   { name: "位置交通", href: "/reports/location", icon: MapPin },
   { name: "商业环境", href: "/reports/environment", icon: Users },

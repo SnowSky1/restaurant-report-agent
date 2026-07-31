@@ -4,7 +4,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, type Variants } from "framer-motion";
-import { AlertCircle, AlertTriangle, ArrowRight, CloudSun, Database, Loader2, MapPin, Navigation, Store, TrendingUp, Users } from "lucide-react";
+import { AlertCircle, AlertTriangle, ArrowRight, CloudSun, Database, Loader2, MapPin, Navigation, Scale, ShieldCheck, Store, TrendingUp, Users } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
 import { LineChart, PieChart, RevenueChart } from "@/components/ui/Chart";
 import { useReport } from "@/context/ReportContext";
@@ -105,7 +105,7 @@ export default function Home() {
       <section className="space-y-3 pt-2">
         <div className="inline-flex items-center gap-2 rounded-full border border-system-blue/20 bg-system-blue/10 px-3 py-1 text-xs font-medium text-system-blue"><Database className="h-3.5 w-3.5" />LangGraph · 高德真实数据优先 · CompeteAI 情景模拟</div>
         <h1 className="text-3xl font-bold tracking-tight md:text-4xl">餐饮经营分析工作台</h1>
-        <p className="max-w-3xl text-system-gray">输入门店与成本假设，生成位置、交通、客群、竞争、定价和营收情景报告。模拟数据会被明确标注，不会伪装成实时结果。</p>
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between"><p className="max-w-3xl text-system-gray">输入门店与成本假设，生成位置、交通、客群、竞争、定价和营收情景报告。模拟数据会被明确标注，不会伪装成实时结果。</p><Link href="/compare" className="inline-flex shrink-0 items-center gap-2 self-start rounded-xl border border-system-purple/20 bg-system-purple/10 px-4 py-2 text-sm font-medium text-system-purple"><Scale className="h-4 w-4" />比较多个候选点</Link></div>
       </section>
 
       <Card className="overflow-hidden border-none bg-gradient-to-br from-system-blue/10 via-transparent to-system-purple/5 shadow-sm">
@@ -137,8 +137,8 @@ export default function Home() {
 
             {reportData.status === "degraded" && <div className="rounded-2xl border border-system-orange/20 bg-system-orange/5 p-4 text-sm"><p className="font-medium text-system-orange">本次分析存在缺失、错误或模拟回退</p><p className="mt-1 text-system-gray">{[...(reportData.provenance.warnings || []), ...reportData.errors].slice(0, 5).join("；") || "部分必需数据未完整返回"}</p>{[...(reportData.provenance.warnings || []), ...reportData.errors].length > 5 && <p className="mt-1 text-xs text-system-gray">另有 {[...(reportData.provenance.warnings || []), ...reportData.errors].length - 5} 条，请在完整报告中查看。</p>}</div>}
 
-            <motion.div variants={{ show: { transition: { staggerChildren: 0.08 } } }} initial="hidden" animate="show" className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-              {[{ title: "竞争强度", value: `${reportData.competition_score}/10`, desc: `${reportData.competitor_count} 家同类门店`, icon: AlertTriangle, color: "text-system-orange" }, { title: "交通便利度", value: reportData.traffic_score, desc: reportData.traffic_desc, icon: TrendingUp, color: "text-system-green" }, { title: "商业环境", value: reportData.poi_main_type, desc: reportData.poi_desc, icon: Users, color: "text-system-blue" }, { title: "当前天气", value: reportData.weather_main, desc: reportData.weather_desc, icon: CloudSun, color: "text-system-yellow" }].map((metric) => <motion.div key={metric.title} variants={item}><Card className="h-full"><CardHeader className="flex flex-row items-center justify-between pb-2"><CardTitle className="text-sm font-medium">{metric.title}</CardTitle><metric.icon className={`h-4 w-4 ${metric.color}`} /></CardHeader><CardContent><div className="text-2xl font-bold">{metric.value}</div><p className="mt-1 line-clamp-2 text-xs text-system-gray">{metric.desc}</p></CardContent></Card></motion.div>)}
+            <motion.div variants={{ show: { transition: { staggerChildren: 0.08 } } }} initial="hidden" animate="show" className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+              {[{ title: "竞争强度", value: `${reportData.competition_score}/10`, desc: `${reportData.competitor_count} 家同类门店`, icon: AlertTriangle, color: "text-system-orange" }, { title: "交通便利度", value: reportData.traffic_score, desc: reportData.traffic_desc, icon: TrendingUp, color: "text-system-green" }, { title: "商业环境", value: reportData.poi_main_type, desc: reportData.poi_desc, icon: Users, color: "text-system-blue" }, { title: "当前天气", value: reportData.weather_main, desc: reportData.weather_desc, icon: CloudSun, color: "text-system-yellow" }, { title: "证据质量", value: `${reportData.evidence_quality?.grade || "-"} · ${reportData.evidence_quality?.score ?? 0}`, desc: reportData.evidence_quality?.limitations?.[0] || "关键数据域完整", icon: ShieldCheck, color: "text-system-purple" }].map((metric) => <motion.div key={metric.title} variants={item}><Card className="h-full"><CardHeader className="flex flex-row items-center justify-between pb-2"><CardTitle className="text-sm font-medium">{metric.title}</CardTitle><metric.icon className={`h-4 w-4 ${metric.color}`} /></CardHeader><CardContent><div className="text-2xl font-bold">{metric.value}</div><p className="mt-1 line-clamp-2 text-xs text-system-gray">{metric.desc}</p></CardContent></Card></motion.div>)}
             </motion.div>
 
             <div className="grid gap-4 lg:grid-cols-7">

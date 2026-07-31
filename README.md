@@ -5,6 +5,8 @@
 ## 已实现能力
 
 - 地址解析、地图选点和精确坐标输入
+- 2–5 个候选点同口径比较、五维权重、盈利硬闸门和排名稳定性分析
+- A–D 证据质量等级，解释真实来源、字段覆盖、样本、错误与经营参数校准
 - 同类门店、地铁/公交/停车、天气和商业环境 POI 分析
 - 真实高德 REST 数据优先，按调用粒度自动回退到明确标注的模拟数据
 - 规则竞争评分 + 可选 LLM 深度解释
@@ -112,6 +114,9 @@ python main.py --name "示例咖啡" --address "北京市朝阳区建国路88号
 - `GET /api/geocode?address=...`：地理编码与数据来源说明。
 - `GET /api/reverse-geocode?location=经度,纬度`：逆地理编码。
 - `POST /api/analyze`：运行完整 LangGraph，并返回报告、图表、原始分析和数据来源。
+- `POST /api/compare`：以相同业态和经营假设筛选 2–5 个候选点；排名由确定性多标准模型生成，不使用 LLM。
+
+候选点决策页面：`http://127.0.0.1:3000/compare`。市场与 GitHub 对标、产品差距及护城河路线见 [MARKET_BENCHMARK.md](MARKET_BENCHMARK.md)。
 
 ## 验证
 

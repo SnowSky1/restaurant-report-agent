@@ -16,12 +16,17 @@ from uuid import uuid4
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from config.settings import settings
 from main import run_analysis
 from nodes.revenue_simulation import SUPPORTED_STORE_TYPES
 from services.llm import krill_fallback_configured
+from services.site_comparison import (
+    DEFAULT_WEIGHTS,
+    assess_evidence_quality,
+    compare_candidate_sites,
+)
 from tools.amap_tools import AmapTools
 
 logger = logging.getLogger(__name__)
@@ -84,25 +89,40 @@ async def add_security_headers(request: Request, call_next):
     return response
 
 
+StoreType = Literal[
+    "餐厅",
+    "咖啡店",
+    "奶茶店",
+    "火锅店",
+    "烧烤店",
+    "快餐店",
+    "面馆",
+    "西餐厅",
+    "日料店",
+    "韩餐厅",
+    "川菜馆",
+    "粤菜馆",
+    "甜品店",
+    "面包店",
+]
+
+
+def _normalize_location(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        longitude, latitude = (float(part.strip()) for part in value.split(",", 1))
+    except (TypeError, ValueError):
+        raise ValueError("location 必须是“经度,纬度”") from None
+    if not -180 <= longitude <= 180 or not -90 <= latitude <= 90:
+        raise ValueError("location 坐标超出有效范围")
+    return f"{longitude:.6f},{latitude:.6f}"
+
+
 class AnalyzeRequest(BaseModel):
     store_name: str = Field(min_length=1, max_length=100)
     store_address: str = Field(min_length=2, max_length=300)
-    store_type: Literal[
-        "餐厅",
-        "咖啡店",
-        "奶茶店",
-        "火锅店",
-        "烧烤店",
-        "快餐店",
-        "面馆",
-        "西餐厅",
-        "日料店",
-        "韩餐厅",
-        "川菜馆",
-        "粤菜馆",
-        "甜品店",
-        "面包店",
-    ] = "餐厅"
+    store_type: StoreType = "餐厅"
     analysis_radius: int = Field(default=1000, ge=100, le=5000)
     location: str | None = None
     deep_analysis: bool = True
@@ -115,15 +135,7 @@ class AnalyzeRequest(BaseModel):
     @field_validator("location")
     @classmethod
     def validate_location(cls, value: str | None) -> str | None:
-        if not value:
-            return None
-        try:
-            longitude, latitude = (float(part.strip()) for part in value.split(",", 1))
-        except (TypeError, ValueError):
-            raise ValueError("location 必须是“经度,纬度”") from None
-        if not -180 <= longitude <= 180 or not -90 <= latitude <= 90:
-            raise ValueError("location 坐标超出有效范围")
-        return f"{longitude:.6f},{latitude:.6f}"
+        return _normalize_location(value)
 
 
 class AnalyzeResponse(BaseModel):
@@ -131,6 +143,59 @@ class AnalyzeResponse(BaseModel):
     status: Literal["complete", "degraded"]
     message: str
     report_markdown: str
+    data: dict[str, Any]
+
+
+class CandidateSite(BaseModel):
+    candidate_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")
+    name: str = Field(min_length=1, max_length=100)
+    address: str = Field(min_length=2, max_length=300)
+    location: str | None = None
+
+    @field_validator("location")
+    @classmethod
+    def validate_location(cls, value: str | None) -> str | None:
+        return _normalize_location(value)
+
+
+class ComparisonWeights(BaseModel):
+    demand_potential: float = Field(default=DEFAULT_WEIGHTS["demand_potential"], ge=0, le=1)
+    accessibility: float = Field(default=DEFAULT_WEIGHTS["accessibility"], ge=0, le=1)
+    competitive_headroom: float = Field(default=DEFAULT_WEIGHTS["competitive_headroom"], ge=0, le=1)
+    profitability: float = Field(default=DEFAULT_WEIGHTS["profitability"], ge=0, le=1)
+    evidence_quality: float = Field(default=DEFAULT_WEIGHTS["evidence_quality"], ge=0, le=1)
+
+    @model_validator(mode="after")
+    def require_positive_total(self) -> ComparisonWeights:
+        if sum(self.model_dump().values()) <= 0:
+            raise ValueError("至少一个比较权重必须大于 0")
+        return self
+
+
+class CompareRequest(BaseModel):
+    candidates: list[CandidateSite] = Field(min_length=2, max_length=5)
+    store_type: StoreType = "餐厅"
+    analysis_radius: int = Field(default=1000, ge=100, le=5000)
+    avg_ticket: float | None = Field(default=None, gt=0, le=5000)
+    seat_count: int | None = Field(default=None, gt=0, le=2000)
+    daily_fixed_cost: float | None = Field(default=None, gt=0, le=1_000_000)
+    variable_cost_rate: float | None = Field(default=None, gt=0, lt=1)
+    weights: ComparisonWeights = Field(default_factory=ComparisonWeights)
+    require_viable: bool = True
+    minimum_evidence_score: float = Field(default=50, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def require_unique_candidates(self) -> CompareRequest:
+        ids = [candidate.candidate_id for candidate in self.candidates]
+        if len(ids) != len(set(ids)):
+            raise ValueError("candidate_id 必须唯一")
+        return self
+
+
+class CompareResponse(BaseModel):
+    success: bool
+    status: Literal["complete", "degraded"]
+    message: str
     data: dict[str, Any]
 
 
@@ -179,7 +244,7 @@ async def require_access_token(
         raise HTTPException(status_code=401, detail="缺少或无效的 API 访问令牌")
 
 
-async def _enforce_rate_limit(request: Request) -> None:
+async def _enforce_rate_limit(request: Request, *, cost: int = 1) -> None:
     limit = max(1, settings.api_rate_limit_per_minute)
     key = request.client.host if request.client else "unknown"
     now = monotonic()
@@ -187,9 +252,9 @@ async def _enforce_rate_limit(request: Request) -> None:
         events = _rate_events[key]
         while events and events[0] <= now - 60:
             events.popleft()
-        if len(events) >= limit:
+        if len(events) + cost > limit:
             raise HTTPException(status_code=429, detail="分析请求过于频繁，请稍后重试")
-        events.append(now)
+        events.extend([now] * cost)
 
 
 def _amap_tools(request: Request) -> AmapTools:
@@ -203,6 +268,18 @@ def _amap_tools(request: Request) -> AmapTools:
         cache_ttl_seconds=settings.amap_cache_ttl_seconds,
         max_retries=settings.amap_max_retries,
         max_parallel_requests=settings.amap_max_parallel_requests,
+    )
+
+
+def _analysis_is_degraded(data: dict[str, Any], state: dict[str, Any]) -> bool:
+    provenance = data.get("provenance") or {}
+    return (
+        bool(data.get("errors"))
+        or bool(provenance.get("used_mock_data"))
+        or any(
+            not state.get(key)
+            for key in ("traffic", "weather", "poi_analysis", "revenue_simulation")
+        )
     )
 
 
@@ -356,14 +433,7 @@ async def create_analysis(
     data = _build_response_data(state, report)
     data["request_id"] = request.state.request_id
     provenance = data.get("provenance") or {}
-    degraded = (
-        bool(data.get("errors"))
-        or bool(provenance.get("used_mock_data"))
-        or any(
-            not state.get(key)
-            for key in ("traffic", "weather", "poi_analysis", "revenue_simulation")
-        )
-    )
+    degraded = _analysis_is_degraded(data, state)
     status: Literal["complete", "degraded"] = "degraded" if degraded else "complete"
     data["status"] = status
     provenance["status"] = status
@@ -382,6 +452,127 @@ async def create_analysis(
     return AnalyzeResponse(
         success=True, status=status, message=message, report_markdown=report, data=data
     )
+
+
+@app.post("/api/compare", response_model=CompareResponse)
+async def compare_sites(
+    payload: CompareRequest,
+    request: Request,
+    _auth: None = Depends(require_access_token),
+) -> CompareResponse:
+    """Screen 2-5 sites with one evidence model and no LLM ranking."""
+
+    await _enforce_rate_limit(request, cost=len(payload.candidates))
+    candidate_semaphore = asyncio.Semaphore(
+        min(len(payload.candidates), max(1, settings.compare_max_parallel_candidates))
+    )
+
+    async def analyze_candidate(candidate: CandidateSite) -> dict[str, Any]:
+        tools = _amap_tools(request)
+        try:
+            async with candidate_semaphore:
+                report, state = await asyncio.wait_for(
+                    run_analysis(
+                        store_name=candidate.name,
+                        store_address=candidate.address,
+                        store_type=payload.store_type,
+                        analysis_radius=payload.analysis_radius,
+                        use_llm=False,
+                        deep_analysis=False,
+                        location=candidate.location,
+                        avg_ticket=payload.avg_ticket,
+                        seat_count=payload.seat_count,
+                        daily_fixed_cost=payload.daily_fixed_cost,
+                        variable_cost_rate=payload.variable_cost_rate,
+                        save_report=False,
+                        display_report=False,
+                        amap_tools=tools,
+                    ),
+                    timeout=settings.analysis_timeout_seconds,
+                )
+            if not report or not state or not state.get("location"):
+                raise ValueError("位置解析失败或工作流没有生成完整结果")
+            data = _build_response_data(state, report)
+            status = "degraded" if _analysis_is_degraded(data, state) else "complete"
+            data["status"] = status
+            (data.get("provenance") or {})["status"] = status
+            # Screening responses intentionally omit long reports and raw chart payloads.
+            data.pop("report_markdown", None)
+            data.pop("charts", None)
+            data.pop("competitors", None)
+            return {
+                "candidate_id": candidate.candidate_id,
+                "candidate_name": candidate.name,
+                "candidate_address": candidate.address,
+                "data": data,
+            }
+        except Exception as error:
+            logger.warning(
+                "candidate_analysis_failed request_id=%s candidate_id=%s error=%s",
+                request.state.request_id,
+                candidate.candidate_id,
+                type(error).__name__,
+            )
+            return {
+                "candidate_id": candidate.candidate_id,
+                "candidate_name": candidate.name,
+                "candidate_address": candidate.address,
+                "error": f"候选点分析失败：{type(error).__name__}",
+            }
+        finally:
+            await tools.close()
+
+    async with _analysis_semaphore:
+        analyzed = await asyncio.gather(
+            *(analyze_candidate(candidate) for candidate in payload.candidates)
+        )
+
+    successful = [item for item in analyzed if item.get("data")]
+    failures = [
+        {
+            "candidate_id": item["candidate_id"],
+            "candidate_name": item["candidate_name"],
+            "candidate_address": item["candidate_address"],
+            "error": item.get("error", "未知错误"),
+        }
+        for item in analyzed
+        if not item.get("data")
+    ]
+    if len(successful) < 2:
+        raise HTTPException(status_code=502, detail="成功分析的候选点不足两个，无法形成可信比较")
+
+    comparison = compare_candidate_sites(
+        successful,
+        weights=payload.weights.model_dump(),
+        require_viable=payload.require_viable,
+        minimum_evidence_score=payload.minimum_evidence_score,
+    )
+    degraded = bool(failures) or any(
+        item["data"].get("status") == "degraded" for item in successful
+    )
+    status: Literal["complete", "degraded"] = "degraded" if degraded else "complete"
+    message = comparison["message"]
+    if failures:
+        message += f" 另有 {len(failures)} 个候选点分析失败，未参与排名。"
+    response_data = {
+        "request_id": request.state.request_id,
+        "status": status,
+        "store_type": payload.store_type,
+        "analysis_radius": payload.analysis_radius,
+        "screening_mode": "deterministic_no_llm",
+        "successful_candidate_count": len(successful),
+        "failed_candidates": failures,
+        **comparison,
+    }
+    request.app.state.last_analysis = {
+        "request_id": request.state.request_id,
+        "operation": "compare",
+        "status": status,
+        "candidate_count": len(payload.candidates),
+        "failed_candidate_count": len(failures),
+        "recommended_candidate_id": comparison.get("recommended_candidate_id"),
+    }
+    return CompareResponse(success=True, status=status, message=message, data=response_data)
 
 
 def _build_response_data(state: dict[str, Any], report: str) -> dict[str, Any]:
@@ -429,7 +620,7 @@ def _build_response_data(state: dict[str, Any], report: str) -> dict[str, Any]:
         ]
     pie_data = [{"name": name, "value": value} for name, value in counts.items() if value > 0]
 
-    return {
+    result = {
         "run_id": state.get("run_id"),
         "status": state.get("workflow_status")
         if state.get("workflow_status") in {"complete", "degraded"}
@@ -463,6 +654,14 @@ def _build_response_data(state: dict[str, Any], report: str) -> dict[str, Any]:
         "errors": list(dict.fromkeys(state.get("errors") or [])),
         "report_markdown": report,
     }
+    calibrated_input_count = sum(
+        state.get(key) is not None
+        for key in ("avg_ticket", "seat_count", "daily_fixed_cost", "variable_cost_rate")
+    )
+    result["evidence_quality"] = assess_evidence_quality(
+        result, calibrated_input_count=calibrated_input_count
+    )
+    return result
 
 
 def _serialize(value: Any) -> Any:

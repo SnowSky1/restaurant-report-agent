@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     api_access_token: str = ""
     api_rate_limit_per_minute: int = 20
     max_concurrent_analyses: int = 2
+    compare_max_parallel_candidates: int = 2
     analysis_timeout_seconds: float = 180.0
     log_level: str = "INFO"
 

@@ -135,6 +135,80 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(unauthorized.status_code, 401)
         self.assertEqual(ready.status_code, 401)
 
+    def test_compare_ranks_candidates_without_llm(self):
+        def make_state(run_id: str, name: str, traffic_score: float, profit: float):
+            return {
+                "run_id": run_id,
+                "store_name": name,
+                "store_address": f"{name}测试地址",
+                "store_type": "咖啡店",
+                "analysis_radius": 1000,
+                "avg_ticket": 36,
+                "seat_count": 42,
+                "daily_fixed_cost": 2000,
+                "variable_cost_rate": 0.35,
+                "location": LocationInfo(
+                    "116.4,39.9", f"{name}测试地址", city="北京市", source="mock"
+                ),
+                "competitors": [],
+                "traffic": TrafficInfo(traffic_score={"综合": traffic_score}, summary="交通样本"),
+                "weather": WeatherData(current={"weather": "晴", "temperature": "26"}),
+                "poi_analysis": POIAnalysis(poi_counts={"写字楼": 30, "住宅": 20}),
+                "charts": ChartData(),
+                "competition_analysis": {"competition_intensity": {"score": 4.0}},
+                "revenue_simulation": {
+                    "viability_status": "viable",
+                    "recommended_strategy": "balanced",
+                    "assumptions": {"estimated_daily_market_orders": 180},
+                    "scenario_simulations": [
+                        {
+                            "id": "balanced",
+                            "name": "均衡经营",
+                            "monthly_profit": profit,
+                            "daily_series": [],
+                        }
+                    ],
+                },
+                "provenance": {
+                    "used_mock_data": True,
+                    "used_real_data": False,
+                    "sources": ["mock"],
+                },
+                "errors": [],
+            }
+
+        analysis_mock = AsyncMock(
+            side_effect=[
+                ("# A", make_state("run-a", "候选 A", 8.0, 20000)),
+                ("# B", make_state("run-b", "候选 B", 6.0, 10000)),
+            ]
+        )
+        with patch("api.main.run_analysis", new=analysis_mock):
+            response = self.client.post(
+                "/api/compare",
+                json={
+                    "store_type": "咖啡店",
+                    "candidates": [
+                        {"candidate_id": "A", "name": "候选 A", "address": "北京市朝阳区 A"},
+                        {"candidate_id": "B", "name": "候选 B", "address": "北京市朝阳区 B"},
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["success"])
+        self.assertEqual(body["status"], "degraded")
+        self.assertEqual(body["data"]["recommended_candidate_id"], "A")
+        self.assertEqual(body["data"]["ranking"][0]["rank"], 1)
+        self.assertEqual(body["data"]["screening_mode"], "deterministic_no_llm")
+        self.assertEqual(body["data"]["request_id"], response.headers["x-request-id"])
+        self.assertEqual(analysis_mock.await_count, 2)
+        for call in analysis_mock.await_args_list:
+            self.assertFalse(call.kwargs["use_llm"])
+            self.assertFalse(call.kwargs["deep_analysis"])
+            self.assertFalse(call.kwargs["save_report"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -76,8 +76,17 @@ export interface ReportData {
     operations?: Array<{ tool: string; source: string; api_calls: number; cache_hits: number; latency_ms: number; message?: string }>;
     sample_scope?: string;
   };
+  evidence_quality?: EvidenceQuality;
   errors: string[];
   report_markdown: string;
+}
+
+export interface EvidenceQuality {
+  score: number;
+  grade: "A" | "B" | "C" | "D";
+  factors: Array<{ name: string; score: number; max_score: number; note: string }>;
+  limitations: string[];
+  method: string;
 }
 
 export interface RevenueScenario {
@@ -131,6 +140,109 @@ interface AnalyzeResponse {
   message: string;
   report_markdown: string;
   data: ReportData;
+}
+
+export interface CandidateSiteInput {
+  candidate_id: string;
+  name: string;
+  address: string;
+  location?: string;
+}
+
+export interface ComparisonWeights {
+  demand_potential: number;
+  accessibility: number;
+  competitive_headroom: number;
+  profitability: number;
+  evidence_quality: number;
+}
+
+export interface CompareRequest {
+  candidates: CandidateSiteInput[];
+  store_type: string;
+  analysis_radius: number;
+  avg_ticket?: number;
+  seat_count?: number;
+  daily_fixed_cost?: number;
+  variable_cost_rate?: number;
+  weights: ComparisonWeights;
+  require_viable: boolean;
+  minimum_evidence_score: number;
+}
+
+export interface RankedCandidate {
+  candidate_id: string;
+  candidate_name: string;
+  candidate_address: string;
+  rank: number | null;
+  score: number;
+  eligible: boolean;
+  disqualifiers: string[];
+  strengths: string[];
+  risks: string[];
+  status: "complete" | "degraded";
+  viability_status: "viable" | "not_viable";
+  best_monthly_profit: number;
+  competitor_count: number;
+  evidence_quality: EvidenceQuality;
+  raw_metrics: ComparisonWeights;
+  criteria: Record<
+    keyof ComparisonWeights,
+    {
+      label: string;
+      raw_value: number;
+      normalized_score: number;
+      weight: number;
+      contribution: number;
+    }
+  >;
+  provenance: {
+    used_real_data: boolean;
+    used_mock_data: boolean;
+    sources: string[];
+    api_calls: number;
+    upstream_latency_ms: number;
+  };
+  errors: string[];
+}
+
+export interface CompareResultData {
+  request_id: string;
+  status: "complete" | "degraded";
+  store_type: string;
+  analysis_radius: number;
+  screening_mode: "deterministic_no_llm";
+  successful_candidate_count: number;
+  failed_candidates: Array<{
+    candidate_id: string;
+    candidate_name: string;
+    candidate_address: string;
+    error: string;
+  }>;
+  decision_status: "recommended" | "relative_ranking_only" | "no_eligible_candidate";
+  message: string;
+  recommended_candidate_id: string | null;
+  best_available_candidate_id: string;
+  weights: ComparisonWeights;
+  ranking: RankedCandidate[];
+  sensitivity: {
+    scenario_count: number;
+    top_pick_rate: Record<string, number>;
+    leader_candidate_id: string | null;
+    leader_pick_rate: number;
+    recommended_pick_rate: number;
+    level: "high" | "medium" | "low" | "not_applicable";
+    note: string;
+  };
+  warnings: string[];
+  validation_plan: Array<{ stage: string; action: string; success_metric: string }>;
+}
+
+interface CompareResponse {
+  success: boolean;
+  status: "complete" | "degraded";
+  message: string;
+  data: CompareResultData;
 }
 
 export interface AppSettings {
@@ -201,6 +313,35 @@ export async function analyzeStore(request: AnalyzeRequest, externalSignal?: Abo
     if (error instanceof DOMException && error.name === "AbortError") {
       if (externalSignal?.aborted) throw new Error("分析已取消");
       throw new Error("分析超过 190 秒，请稍后重试或关闭 LLM 深度解释");
+    }
+    throw error;
+  } finally {
+    externalSignal?.removeEventListener("abort", abort);
+    window.clearTimeout(timeout);
+  }
+}
+
+export async function compareSites(
+  request: CompareRequest,
+  externalSignal?: AbortSignal
+): Promise<CompareResponse> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  externalSignal?.addEventListener("abort", abort, { once: true });
+  const timeout = window.setTimeout(() => controller.abort(), 420_000);
+  const settings = getSettings();
+  try {
+    const response = await fetch(`${settings.apiEndpoint}/api/compare`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...requestHeaders(settings) },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    return await readJson<CompareResponse>(response);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      if (externalSignal?.aborted) throw new Error("候选点比较已取消");
+      throw new Error("候选点比较超过 7 分钟，请减少候选点或稍后重试");
     }
     throw error;
   } finally {
