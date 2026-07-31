@@ -1,24 +1,25 @@
 """
 餐饮店经营分析智能体 - 主入口
 
-使用 LangGraph 框架，集成高德地图 MCP 和可视化图表 MCP 服务，
+使用 LangGraph 框架，集成高德地图 REST/MCP、规则模型和可选 LLM，
 自动生成包含竞争对手分析、交通便利性、天气影响、商业环境等多维度的经营报告。
 
 使用方法:
     python main.py --name "店铺名称" --address "店铺地址" --type "餐厅" --radius 1000
 
 环境变量:
-    - LLM_PROVIDER: 选择 LLM 提供商 (openai/deepseek)
+    - LLM_PROVIDER: 选择 LLM 提供商 (openai/deepseek/qwen/siliconflow)
     - OPENAI_API_KEY: OpenAI API Key
     - DEEPSEEK_API_KEY: DeepSeek API Key
     - AMAP_MAPS_API_KEY: 高德地图 API Key
 """
 
-import os
-import sys
-import asyncio
 import argparse
-from datetime import datetime
+import asyncio
+import logging
+import sys
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # 添加项目根目录到路径
@@ -26,22 +27,21 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.markdown import Markdown
 
 from config.settings import settings
-from services.llm import build_llm
-from tools.amap_tools import AmapTools
-from tools.chart_tools import ChartTools
 from graph.agent import create_agent_graph
 from nodes.state import create_initial_state
-
+from services.llm import build_llm
+from tools.amap_tools import AmapTools
 
 # 加载环境变量
 load_dotenv()
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 def get_llm():
@@ -64,10 +64,11 @@ async def run_analysis(
     variable_cost_rate: float = None,
     save_report: bool = True,
     display_report: bool = True,
+    amap_tools: AmapTools | None = None,
 ) -> tuple[str, dict]:
     """
     运行店铺经营分析
-    
+
     Args:
         store_name: 店铺名称
         store_address: 店铺地址
@@ -76,20 +77,22 @@ async def run_analysis(
         output_file: 输出文件路径
         use_llm: 是否使用 LLM 增强
         deep_analysis: 是否启用深度竞争分析 (借鉴 CompeteAI 理论)
-        
+
     Returns:
         str: 生成的报告内容
     """
     deep_analysis_text = "\n深度分析: ✓ 已启用 (自研 CompeteAI)" if deep_analysis else ""
-    console.print(Panel.fit(
-        f"[bold blue]🏪 餐饮店经营分析智能体[/bold blue]\n\n"
-        f"店铺名称: {store_name}\n"
-        f"店铺地址: {store_address}\n"
-        f"店铺类型: {store_type}\n"
-        f"分析半径: {analysis_radius}米{deep_analysis_text}",
-        title="分析任务"
-    ))
-    
+    console.print(
+        Panel.fit(
+            f"[bold blue]🏪 餐饮店经营分析智能体[/bold blue]\n\n"
+            f"店铺名称: {store_name}\n"
+            f"店铺地址: {store_address}\n"
+            f"店铺类型: {store_type}\n"
+            f"分析半径: {analysis_radius}米{deep_analysis_text}",
+            title="分析任务",
+        )
+    )
+
     # 验证配置
     # LLM enhancement is optional. A missing primary must not prevent the
     # configured Krill fallback or the deterministic report from running.
@@ -99,20 +102,20 @@ async def run_analysis(
             console.print(f"[red]❌ 配置错误: {error}[/red]")
         console.print("\n[yellow]请检查 .env 文件中的配置[/yellow]")
         return "", {}
-    
+
     # 初始化工具
-    amap_tools = AmapTools(
+    owns_amap_tools = amap_tools is None
+    amap_tools = amap_tools or AmapTools(
         mcp_url=settings.amap_mcp_url,
         api_key=settings.amap_maps_api_key,
         data_mode=settings.data_mode,
         transport=settings.amap_transport,
         timeout=settings.request_timeout_seconds,
+        cache_ttl_seconds=settings.amap_cache_ttl_seconds,
+        max_retries=settings.amap_max_retries,
+        max_parallel_requests=settings.amap_max_parallel_requests,
     )
-    
-    chart_tools = ChartTools(
-        mcp_url=settings.chart_mcp_url
-    )
-    
+
     # 初始化 LLM（可选）
     llm = None
     if use_llm:
@@ -130,19 +133,16 @@ async def run_analysis(
     except Exception as error:
         if settings.data_mode == "real":
             console.print(f"[red]❌ 数据服务初始化失败: {error}[/red]")
-            await amap_tools.close()
-            await chart_tools.close()
+            if owns_amap_tools:
+                await amap_tools.close()
             return "", {}
         console.print(f"[yellow]⚠ 数据服务初始化失败，将按 auto 模式回退: {error}[/yellow]")
-    
+
     # 创建工作流
     graph = create_agent_graph(
-        amap_tools=amap_tools,
-        chart_tools=chart_tools,
-        llm=llm,
-        enable_competition_analysis=deep_analysis
+        amap_tools=amap_tools, llm=llm, enable_competition_analysis=deep_analysis
     )
-    
+
     # 创建初始状态
     initial_state = create_initial_state(
         store_name=store_name,
@@ -155,43 +155,42 @@ async def run_analysis(
         daily_fixed_cost=daily_fixed_cost,
         variable_cost_rate=variable_cost_rate,
     )
-    
-    # 增加对传入 location 的处理支持
-    # (修改 create_initial_state 或者在创建后直接更新)
-    
+
     # 运行分析
+    started = time.perf_counter()
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
         task = progress.add_task("[cyan]正在分析...", total=None)
-        
+
         try:
             # 执行工作流
             progress.update(task, description="[cyan]📍 解析店铺位置...")
             final_state = await graph.ainvoke(initial_state)
-            
+
             progress.update(task, description="[green]✓ 分析完成!")
-            
+
         except Exception as e:
+            logger.exception("analysis_failed store_type=%s", store_type)
             console.print(f"[red]❌ 分析失败: {e}[/red]")
             return "", {}
         finally:
             # 清理资源
-            await amap_tools.close()
-            await chart_tools.close()
-    
+            if owns_amap_tools:
+                await amap_tools.close()
+
     # 获取报告
     report = final_state.get("final_report", "")
-    
+
     if not report:
         console.print("[red]❌ 报告生成失败[/red]")
         if final_state.get("errors"):
             for error in final_state["errors"]:
                 console.print(f"  - {error}")
         return "", final_state
-    
+
     # 保存报告
     output_path = None
     if output_file:
@@ -200,30 +199,59 @@ async def run_analysis(
         # 默认保存到 reports 目录
         output_dir = Path(settings.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _prune_old_reports(output_dir, settings.report_retention_days)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         # 使用安全的文件名（避免中文编码问题）
         safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in store_name)
         if not safe_name or safe_name == "_" * len(safe_name):
             safe_name = "report"
-        output_path = output_dir / f"{safe_name}_{timestamp}.md"
-    
+        run_id = str(final_state.get("run_id") or "unknown")[:12]
+        output_path = output_dir / f"{safe_name}_{timestamp}_{run_id}.md"
+
     # 增加确保 output_dir 存在的方法，因为如果是命令行运行可能路径不存在
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(report, encoding="utf-8")
         console.print(f"\n[green]✓ 报告已保存到: {output_path}[/green]")
-    
+
     # 显示报告预览
     if display_report:
         console.print("\n")
-        console.print(Panel(
-            Markdown(report[:2000] + "\n\n..." if len(report) > 2000 else report),
-            title="[bold]报告预览[/bold]",
-            border_style="blue"
-        ))
-    
+        console.print(
+            Panel(
+                Markdown(report[:2000] + "\n\n..." if len(report) > 2000 else report),
+                title="[bold]报告预览[/bold]",
+                border_style="blue",
+            )
+        )
+
     # 将 final_state 一并返回给 API 使用
+    logger.info(
+        "analysis_complete run_id=%s status=%s elapsed_ms=%d errors=%d",
+        final_state.get("run_id"),
+        final_state.get("workflow_status"),
+        round((time.perf_counter() - started) * 1000),
+        len(final_state.get("errors") or []),
+    )
     return report, final_state
+
+
+def _prune_old_reports(output_dir: Path, retention_days: int) -> None:
+    if retention_days <= 0:
+        return
+    cutoff = datetime.now().timestamp() - timedelta(days=retention_days).total_seconds()
+    resolved_dir = output_dir.resolve()
+    for report_file in output_dir.glob("*.md"):
+        try:
+            resolved_file = report_file.resolve()
+            if resolved_file.parent == resolved_dir and report_file.stat().st_mtime < cutoff:
+                report_file.unlink()
+        except OSError as error:
+            logger.warning(
+                "report_retention_failed path=%s error=%s",
+                report_file,
+                type(error).__name__,
+            )
 
 
 def main():
@@ -235,73 +263,74 @@ def main():
 示例:
   python main.py --name "星巴克咖啡" --address "北京市朝阳区建国路88号" --type "咖啡店"
   python main.py --name "海底捞火锅" --address "上海市浦东新区陆家嘴" --type "火锅店" --radius 1500
-        """
+        """,
     )
-    
+
+    parser.add_argument("--name", "-n", required=True, help="店铺名称")
+
+    parser.add_argument("--address", "-a", required=True, help="店铺地址")
+
     parser.add_argument(
-        "--name", "-n",
-        required=True,
-        help="店铺名称"
-    )
-    
-    parser.add_argument(
-        "--address", "-a",
-        required=True,
-        help="店铺地址"
-    )
-    
-    parser.add_argument(
-        "--type", "-t",
+        "--type",
+        "-t",
         default="餐厅",
-        choices=["餐厅", "咖啡店", "奶茶店", "火锅店", "烧烤店", "快餐店", "面馆", "西餐厅", "日料店", "韩餐厅", "川菜馆", "粤菜馆", "甜品店", "面包店"],
-        help="店铺类型 (默认: 餐厅)"
+        choices=[
+            "餐厅",
+            "咖啡店",
+            "奶茶店",
+            "火锅店",
+            "烧烤店",
+            "快餐店",
+            "面馆",
+            "西餐厅",
+            "日料店",
+            "韩餐厅",
+            "川菜馆",
+            "粤菜馆",
+            "甜品店",
+            "面包店",
+        ],
+        help="店铺类型 (默认: 餐厅)",
     )
-    
+
     parser.add_argument(
-        "--radius", "-r",
-        type=int,
-        default=1000,
-        help="分析半径，单位米 (默认: 1000)"
+        "--radius", "-r", type=int, default=1000, help="分析半径，单位米 (默认: 1000)"
     )
-    
+
+    parser.add_argument("--output", "-o", help="输出文件路径 (默认: ./reports/店铺名_时间戳.md)")
+
+    parser.add_argument("--no-llm", action="store_true", help="不使用 LLM 增强总结")
+
     parser.add_argument(
-        "--output", "-o",
-        help="输出文件路径 (默认: ./reports/店铺名_时间戳.md)"
-    )
-    
-    parser.add_argument(
-        "--no-llm",
+        "--deep-analysis",
+        "-d",
         action="store_true",
-        help="不使用 LLM 增强总结"
-    )
-    
-    parser.add_argument(
-        "--deep-analysis", "-d",
-        action="store_true",
-        help="启用深度竞争分析 (自研 CompeteAI 理论框架)"
+        help="启用深度竞争分析 (自研 CompeteAI 理论框架)",
     )
 
     parser.add_argument("--avg-ticket", type=float, help="模拟使用的平均客单价（元）")
     parser.add_argument("--seat-count", type=int, help="模拟使用的座位数")
     parser.add_argument("--daily-fixed-cost", type=float, help="模拟使用的日固定成本（元）")
     parser.add_argument("--variable-cost-rate", type=float, help="模拟使用的变动成本率，如 0.4")
-    
+
     args = parser.parse_args()
-    
+
     # 运行分析
-    report, _ = asyncio.run(run_analysis(
-        store_name=args.name,
-        store_address=args.address,
-        store_type=args.type,
-        analysis_radius=args.radius,
-        output_file=args.output,
-        use_llm=not args.no_llm,
-        deep_analysis=args.deep_analysis,
-        avg_ticket=args.avg_ticket,
-        seat_count=args.seat_count,
-        daily_fixed_cost=args.daily_fixed_cost,
-        variable_cost_rate=args.variable_cost_rate,
-    ))
+    report, _ = asyncio.run(
+        run_analysis(
+            store_name=args.name,
+            store_address=args.address,
+            store_type=args.type,
+            analysis_radius=args.radius,
+            output_file=args.output,
+            use_llm=not args.no_llm,
+            deep_analysis=args.deep_analysis,
+            avg_ticket=args.avg_ticket,
+            seat_count=args.seat_count,
+            daily_fixed_cost=args.daily_fixed_cost,
+            variable_cost_rate=args.variable_cost_rate,
+        )
+    )
 
 
 if __name__ == "__main__":

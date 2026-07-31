@@ -36,7 +36,7 @@ async def traffic_node(state: AgentState, amap_tools: Any) -> dict:
     )
 
     groups: list[list[dict[str, Any]]] = []
-    for (label, _), result in zip(specs, results):
+    for (label, _), result in zip(specs, results, strict=True):
         if isinstance(result, Exception):
             errors.append(f"{label}搜索失败：{result}")
             groups.append([])
@@ -64,15 +64,42 @@ def _distance(poi: dict[str, Any], default: int) -> int:
         return default
 
 
-def _calculate_traffic_score(subway: list[dict], bus: list[dict], parking: list[dict]) -> dict[str, float]:
+def _calculate_traffic_score(
+    subway: list[dict], bus: list[dict], parking: list[dict]
+) -> dict[str, float]:
     nearest_subway = min((_distance(item, 2000) for item in subway), default=2000)
     nearest_bus = min((_distance(item, 1000) for item in bus), default=1000)
 
-    subway_score = 10 if nearest_subway <= 200 else 8 if nearest_subway <= 500 else 6 if nearest_subway <= 800 else 4 if subway else 2
-    bus_score = 10 if nearest_bus <= 100 and len(bus) >= 3 else 8 if nearest_bus <= 200 else 6 if nearest_bus <= 300 else 4 if bus else 2
+    subway_score = (
+        10
+        if nearest_subway <= 200
+        else 8
+        if nearest_subway <= 500
+        else 6
+        if nearest_subway <= 800
+        else 4
+        if subway
+        else 2
+    )
+    bus_score = (
+        10
+        if nearest_bus <= 100 and len(bus) >= 3
+        else 8
+        if nearest_bus <= 200
+        else 6
+        if nearest_bus <= 300
+        else 4
+        if bus
+        else 2
+    )
     parking_score = 10 if len(parking) >= 5 else 8 if len(parking) >= 3 else 6 if parking else 2
     total = round(subway_score * 0.4 + bus_score * 0.3 + parking_score * 0.3, 1)
-    return {"地铁": subway_score, "公交": bus_score, "停车": parking_score, "综合": total}
+    return {
+        "地铁": subway_score,
+        "公交": bus_score,
+        "停车": parking_score,
+        "综合": total,
+    }
 
 
 def _generate_traffic_summary(

@@ -8,17 +8,24 @@ fallback instead of presenting sample data as live data.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
+from contextvars import ContextVar
+from copy import deepcopy
 from datetime import datetime
+from time import monotonic, perf_counter
 from typing import Any
 
 import httpx
 
 from mcp_client.client import MCPClient
 
-
 AMAP_REST_BASE_URL = "https://restapi.amap.com"
+_REST_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_OPERATION_METRICS: ContextVar[dict[str, int] | None] = ContextVar(
+    "amap_operation_metrics", default=None
+)
 
 
 class AmapAPIError(RuntimeError):
@@ -36,14 +43,27 @@ class AmapTools:
         data_mode: str = "auto",
         transport: str = "rest",
         timeout: float = 30.0,
+        http_client: httpx.AsyncClient | None = None,
+        cache_ttl_seconds: float = 300.0,
+        max_retries: int = 2,
+        max_parallel_requests: int = 4,
     ):
         self.api_key = api_key
         self.data_mode = data_mode
         self.transport = transport
         self.timeout = timeout
+        self.cache_ttl_seconds = max(0.0, cache_ttl_seconds)
+        self.max_retries = max(0, max_retries)
+        self._request_semaphore = asyncio.Semaphore(max(1, max_parallel_requests))
         self.mcp_client = MCPClient(mcp_url, api_key, timeout) if transport == "mcp" else None
-        self.http = httpx.AsyncClient(base_url=AMAP_REST_BASE_URL, timeout=timeout)
-        self.events: list[dict[str, str]] = []
+        self._owns_http = http_client is None
+        self.http = http_client
+        if self.http is None and data_mode != "mock" and api_key:
+            self.http = httpx.AsyncClient(base_url=AMAP_REST_BASE_URL, timeout=timeout)
+        self.events: list[dict[str, Any]] = []
+        self.http_call_count = 0
+        self.cache_hits = 0
+        self.upstream_latency_ms = 0
 
     @property
     def used_mock_data(self) -> bool:
@@ -63,6 +83,11 @@ class AmapTools:
             "used_real_data": self.used_real_data,
             "used_mock_data": self.used_mock_data,
             "warnings": warnings,
+            "api_calls": self.http_call_count,
+            "cache_hits": self.cache_hits,
+            "upstream_latency_ms": self.upstream_latency_ms,
+            "operations": [dict(event) for event in self.events],
+            "sample_scope": "高德周边搜索每类最多返回单页 25 条，属于样本而非完整市场普查",
         }
 
     async def initialize(self) -> None:
@@ -70,15 +95,39 @@ class AmapTools:
             await self.mcp_client.initialize()
 
     async def close(self) -> None:
-        await self.http.aclose()
+        if self._owns_http and self.http is not None:
+            await self.http.aclose()
         if self.mcp_client:
             await self.mcp_client.close()
 
-    def _record(self, tool: str, source: str, message: str = "") -> None:
-        self.events.append({"tool": tool, "source": source, "message": message})
+    def _metric_start(self) -> dict[str, int]:
+        metrics = {"api_calls": 0, "cache_hits": 0, "latency_ms": 0}
+        _OPERATION_METRICS.set(metrics)
+        return metrics
+
+    def _record(
+        self,
+        tool: str,
+        source: str,
+        message: str = "",
+        started: dict[str, int] | None = None,
+    ) -> None:
+        metrics = started or {"api_calls": 0, "cache_hits": 0, "latency_ms": 0}
+        self.events.append(
+            {
+                "tool": tool,
+                "source": source,
+                "message": message,
+                "api_calls": metrics["api_calls"],
+                "cache_hits": metrics["cache_hits"],
+                "latency_ms": metrics["latency_ms"],
+            }
+        )
 
     @staticmethod
-    def _with_meta(payload: dict[str, Any], source: str, fallback_reason: str = "") -> dict[str, Any]:
+    def _with_meta(
+        payload: dict[str, Any], source: str, fallback_reason: str = ""
+    ) -> dict[str, Any]:
         result = dict(payload)
         result["_meta"] = {
             "source": source,
@@ -90,26 +139,113 @@ class AmapTools:
     async def _rest_get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.api_key:
             raise AmapAPIError("Amap API key is not configured")
-        response = await self.http.get(path, params={**params, "key": self.api_key, "output": "json"})
-        response.raise_for_status()
-        data = response.json()
-        if str(data.get("status")) != "1":
-            info = data.get("info") or "unknown Amap error"
-            infocode = data.get("infocode") or "unknown"
-            raise AmapAPIError(f"{info} ({infocode})")
-        return data
+        if self.http is None:
+            self.http = httpx.AsyncClient(base_url=AMAP_REST_BASE_URL, timeout=self.timeout)
+        request_params = {**params, "key": self.api_key, "output": "json"}
+        cache_key = self._cache_key(path, request_params)
+        cached = _REST_CACHE.get(cache_key)
+        if cached and cached[0] > monotonic():
+            self.cache_hits += 1
+            metrics = _OPERATION_METRICS.get()
+            if metrics is not None:
+                metrics["cache_hits"] += 1
+            return deepcopy(cached[1])
+        if cached:
+            _REST_CACHE.pop(cache_key, None)
+
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            started = perf_counter()
+            latency_recorded = False
+            self.http_call_count += 1
+            metrics = _OPERATION_METRICS.get()
+            if metrics is not None:
+                metrics["api_calls"] += 1
+            try:
+                async with self._request_semaphore:
+                    response = await self.http.get(path, params=request_params)
+                elapsed_ms = round((perf_counter() - started) * 1000)
+                self.upstream_latency_ms += elapsed_ms
+                if metrics is not None:
+                    metrics["latency_ms"] += elapsed_ms
+                latency_recorded = True
+                if response.status_code == 429 or response.status_code >= 500:
+                    raise httpx.HTTPStatusError(
+                        f"retryable Amap HTTP {response.status_code}",
+                        request=response.request,
+                        response=response,
+                    )
+                response.raise_for_status()
+                data = response.json()
+                if str(data.get("status")) != "1":
+                    info = data.get("info") or "unknown Amap error"
+                    infocode = data.get("infocode") or "unknown"
+                    raise AmapAPIError(f"{info} ({infocode})")
+                if self.cache_ttl_seconds:
+                    if len(_REST_CACHE) >= 1024:
+                        expired = [
+                            key
+                            for key, (expires, _) in _REST_CACHE.items()
+                            if expires <= monotonic()
+                        ]
+                        for key in expired:
+                            _REST_CACHE.pop(key, None)
+                        if len(_REST_CACHE) >= 1024:
+                            _REST_CACHE.pop(next(iter(_REST_CACHE)))
+                    _REST_CACHE[cache_key] = (
+                        monotonic() + self.cache_ttl_seconds,
+                        deepcopy(data),
+                    )
+                return data
+            except (httpx.RequestError, httpx.HTTPStatusError) as error:
+                if not latency_recorded:
+                    elapsed_ms = round((perf_counter() - started) * 1000)
+                    self.upstream_latency_ms += elapsed_ms
+                    if metrics is not None:
+                        metrics["latency_ms"] += elapsed_ms
+                last_error = error
+                if attempt >= self.max_retries:
+                    status = (
+                        error.response.status_code
+                        if isinstance(error, httpx.HTTPStatusError)
+                        else None
+                    )
+                    detail = f"HTTP {status}" if status else type(error).__name__
+                    raise AmapAPIError(
+                        f"Amap request failed after {attempt + 1} attempt(s): {detail}"
+                    ) from error
+                await asyncio.sleep(min(0.25 * (2**attempt), 1.0))
+        raise AmapAPIError(str(last_error or "Amap request failed"))
+
+    def _cache_key(self, path: str, params: dict[str, Any]) -> str:
+        safe_params = {key: value for key, value in params.items() if key != "key"}
+        key_fingerprint = hashlib.sha256(self.api_key.encode("utf-8")).hexdigest()[:12]
+        payload = repr((path, sorted(safe_params.items()), key_fingerprint)).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
 
     async def _mcp_call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if not self.mcp_client:
             raise AmapAPIError("MCP transport is not initialized")
-        result = await self.mcp_client.call_tool(tool, arguments)
+        started = perf_counter()
+        self.http_call_count += 1
+        metrics = _OPERATION_METRICS.get()
+        if metrics is not None:
+            metrics["api_calls"] += 1
+        try:
+            result = await self.mcp_client.call_tool(tool, arguments)
+        finally:
+            elapsed_ms = round((perf_counter() - started) * 1000)
+            self.upstream_latency_ms += elapsed_ms
+            if metrics is not None:
+                metrics["latency_ms"] += elapsed_ms
         if not result:
             raise AmapAPIError(f"MCP tool {tool} returned no data")
         return result
 
     async def geocode(self, address: str, city: str | None = None) -> dict[str, Any]:
+        metric_start = self._metric_start()
         if self.data_mode == "mock":
-            return self._mock_geocode(address, "DATA_MODE=mock")
+            return self._mock_geocode(address, "DATA_MODE=mock", metric_start)
 
         try:
             if self.transport == "mcp":
@@ -120,7 +256,11 @@ class AmapTools:
                     {"address": address, **({"city": city} if city else {})},
                 )
             if data.get("geocodes"):
-                self._record("geocode", "amap_mcp" if self.transport == "mcp" else "amap_rest")
+                self._record(
+                    "geocode",
+                    "amap_mcp" if self.transport == "mcp" else "amap_rest",
+                    started=metric_start,
+                )
                 return self._with_meta(data, "amap_mcp" if self.transport == "mcp" else "amap_rest")
             raise AmapAPIError("geocoding returned no candidate")
         except Exception as primary_error:
@@ -129,13 +269,13 @@ class AmapTools:
             if self.transport == "rest":
                 try:
                     candidate = await self._place_text_geocode(address, city)
-                    self._record("geocode", "amap_rest", "used place-text fallback")
+                    self._record("geocode", "amap_rest", "used place-text fallback", metric_start)
                     return candidate
                 except Exception as place_error:
                     primary_error = AmapAPIError(f"{primary_error}; place search: {place_error}")
             if self.data_mode == "real":
                 raise primary_error
-            return self._mock_geocode(address, str(primary_error))
+            return self._mock_geocode(address, str(primary_error), metric_start)
 
     async def _place_text_geocode(self, address: str, city: str | None) -> dict[str, Any]:
         inferred_city = city or self._extract_city(address)
@@ -164,7 +304,9 @@ class AmapTools:
             component = regeo.get("regeocode", {}).get("addressComponent", {})
             business_areas = component.get("businessAreas") or []
             geocode = {
-                "formatted_address": regeo.get("regeocode", {}).get("formatted_address") or poi.get("address") or address,
+                "formatted_address": regeo.get("regeocode", {}).get("formatted_address")
+                or poi.get("address")
+                or address,
                 "location": location,
                 "province": component.get("province") or "",
                 "city": component.get("city") or component.get("province") or inferred_city or "",
@@ -201,8 +343,9 @@ class AmapTools:
         return result
 
     async def reverse_geocode(self, location: str, radius: int = 1000) -> dict[str, Any]:
+        metric_start = self._metric_start()
         if self.data_mode == "mock":
-            return self._mock_reverse_geocode(location, "DATA_MODE=mock")
+            return self._mock_reverse_geocode(location, "DATA_MODE=mock", metric_start)
         try:
             if self.transport == "mcp":
                 data = await self._mcp_call(
@@ -218,12 +361,12 @@ class AmapTools:
                 source = "amap_rest"
             if not data.get("regeocode"):
                 raise AmapAPIError("reverse geocoding returned no result")
-            self._record("reverse_geocode", source)
+            self._record("reverse_geocode", source, started=metric_start)
             return self._with_meta(data, source)
         except Exception as error:
             if self.data_mode == "real":
                 raise
-            return self._mock_reverse_geocode(location, str(error))
+            return self._mock_reverse_geocode(location, str(error), metric_start)
 
     async def search_around(
         self,
@@ -233,8 +376,11 @@ class AmapTools:
         radius: int = 1000,
         page_size: int = 25,
     ) -> dict[str, Any]:
+        metric_start = self._metric_start()
         if self.data_mode == "mock":
-            return self._mock_search(location, keywords, types, radius, "DATA_MODE=mock")
+            return self._mock_search(
+                location, keywords, types, radius, "DATA_MODE=mock", metric_start
+            )
         try:
             if self.transport == "mcp":
                 data = await self._mcp_call(
@@ -267,12 +413,12 @@ class AmapTools:
             pois = data.get("pois") or []
             if not pois:
                 raise AmapAPIError("nearby search returned no POIs")
-            self._record("search_around", source)
+            self._record("search_around", source, started=metric_start)
             return self._with_meta(data, source)
         except Exception as error:
             if self.data_mode == "real":
                 raise
-            return self._mock_search(location, keywords, types, radius, str(error))
+            return self._mock_search(location, keywords, types, radius, str(error), metric_start)
 
     @staticmethod
     def _infer_types(keywords: str) -> str:
@@ -293,18 +439,17 @@ class AmapTools:
         return ""
 
     async def get_weather(self, city: str) -> dict[str, Any]:
+        metric_start = self._metric_start()
         if self.data_mode == "mock":
-            return self._mock_weather(city, "DATA_MODE=mock")
+            return self._mock_weather(city, "DATA_MODE=mock", metric_start)
         try:
             if self.transport == "mcp":
                 data = await self._mcp_call("maps_weather", {"city": city, "extensions": "all"})
                 source = "amap_mcp"
             else:
-                live = await self._rest_get(
-                    "/v3/weather/weatherInfo", {"city": city, "extensions": "base"}
-                )
-                forecast = await self._rest_get(
-                    "/v3/weather/weatherInfo", {"city": city, "extensions": "all"}
+                live, forecast = await asyncio.gather(
+                    self._rest_get("/v3/weather/weatherInfo", {"city": city, "extensions": "base"}),
+                    self._rest_get("/v3/weather/weatherInfo", {"city": city, "extensions": "all"}),
                 )
                 data = {
                     "status": "1",
@@ -314,19 +459,30 @@ class AmapTools:
                 source = "amap_rest"
             if not data.get("lives") and not data.get("forecasts"):
                 raise AmapAPIError("weather returned no data")
-            self._record("weather", source)
+            self._record("weather", source, started=metric_start)
             return self._with_meta(data, source)
         except Exception as error:
             if self.data_mode == "real":
                 raise
-            return self._mock_weather(city, str(error))
+            return self._mock_weather(city, str(error), metric_start)
 
-    def _mock_geocode(self, address: str, reason: str) -> dict[str, Any]:
+    def _mock_geocode(
+        self, address: str, reason: str, metric_start: dict[str, int] | None = None
+    ) -> dict[str, Any]:
         reason = self._friendly_reason(reason)
         known = [
-            (("钱江世纪城",), ("120.254158,30.231242", "杭州市", "萧山区", "钱江世纪城", "330109")),
-            (("柏林春天", "泊林春天"), ("120.290182,30.237687", "杭州市", "萧山区", "钱江世纪城", "330109")),
-            (("SOHO现代城", "建国路88号"), ("116.475831,39.906540", "北京市", "朝阳区", "大望路", "110105")),
+            (
+                ("钱江世纪城",),
+                ("120.254158,30.231242", "杭州市", "萧山区", "钱江世纪城", "330109"),
+            ),
+            (
+                ("柏林春天", "泊林春天"),
+                ("120.290182,30.237687", "杭州市", "萧山区", "钱江世纪城", "330109"),
+            ),
+            (
+                ("SOHO现代城", "建国路88号"),
+                ("116.475831,39.906540", "北京市", "朝阳区", "大望路", "110105"),
+            ),
         ]
         selected = None
         for words, value in known:
@@ -343,26 +499,30 @@ class AmapTools:
                 "110105",
             )
         location, city, district, business_area, adcode = selected
-        self._record("geocode", "mock", f"地理编码使用模拟数据：{reason}")
+        self._record("geocode", "mock", f"地理编码使用模拟数据：{reason}", metric_start)
         return self._with_meta(
             {
                 "status": "1",
-                "geocodes": [{
-                    "formatted_address": address,
-                    "location": location,
-                    "city": city,
-                    "district": district,
-                    "business_area": business_area,
-                    "adcode": adcode,
-                }],
+                "geocodes": [
+                    {
+                        "formatted_address": address,
+                        "location": location,
+                        "city": city,
+                        "district": district,
+                        "business_area": business_area,
+                        "adcode": adcode,
+                    }
+                ],
             },
             "mock",
             reason,
         )
 
-    def _mock_reverse_geocode(self, location: str, reason: str) -> dict[str, Any]:
+    def _mock_reverse_geocode(
+        self, location: str, reason: str, metric_start: dict[str, int] | None = None
+    ) -> dict[str, Any]:
         reason = self._friendly_reason(reason)
-        self._record("reverse_geocode", "mock", f"逆地理编码使用模拟数据：{reason}")
+        self._record("reverse_geocode", "mock", f"逆地理编码使用模拟数据：{reason}", metric_start)
         return self._with_meta(
             {
                 "status": "1",
@@ -381,10 +541,24 @@ class AmapTools:
             reason,
         )
 
-    def _mock_search(self, location: str, keywords: str, types: str, radius: int, reason: str) -> dict[str, Any]:
+    def _mock_search(
+        self,
+        location: str,
+        keywords: str,
+        types: str,
+        radius: int,
+        reason: str,
+        metric_start: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
         reason = self._friendly_reason(reason)
-        is_commercial_bundle = sum(code in types for code in ("120201", "120300", "060100", "141200", "090100")) >= 3
-        label = "商业环境 POI" if is_commercial_bundle else (keywords or self._type_label(types) or "周边设施")
+        is_commercial_bundle = (
+            sum(code in types for code in ("120201", "120300", "060100", "141200", "090100")) >= 3
+        )
+        label = (
+            "商业环境 POI"
+            if is_commercial_bundle
+            else (keywords or self._type_label(types) or "周边设施")
+        )
         if is_commercial_bundle:
             specs = [
                 ("国际中心A座", "商务住宅;楼宇;商务写字楼", "120201"),
@@ -413,8 +587,10 @@ class AmapTools:
                 }
                 for index, (name, poi_type, typecode) in enumerate(specs, 1)
             ]
-            self._record("search_around", "mock", f"{label}使用模拟数据：{reason}")
-            return self._with_meta({"status": "1", "count": str(len(pois)), "pois": pois}, "mock", reason)
+            self._record("search_around", "mock", f"{label}使用模拟数据：{reason}", metric_start)
+            return self._with_meta(
+                {"status": "1", "count": str(len(pois)), "pois": pois}, "mock", reason
+            )
 
         if "地铁" in label or "150500" in types:
             names = ["中心广场地铁站", "商务区地铁站"]
@@ -445,20 +621,29 @@ class AmapTools:
             poi_type = "餐饮服务;咖啡厅"
         pois = []
         for index, name in enumerate(names, 1):
-            pois.append({
-                "id": f"MOCK{index:03d}",
-                "name": name,
-                "type": poi_type,
-                "typecode": types.split("|")[0] if types else "050000",
-                "address": f"模拟地址 {index} 号",
-                "location": location,
-                "distance": str(80 + index * 115),
-                "biz_ext": {"rating": f"{4.0 + index / 10:.1f}", "cost": str(25 + index * 5)},
-            })
-        self._record("search_around", "mock", f"{label}使用模拟数据：{reason}")
-        return self._with_meta({"status": "1", "count": str(len(pois)), "pois": pois}, "mock", reason)
+            pois.append(
+                {
+                    "id": f"MOCK{index:03d}",
+                    "name": name,
+                    "type": poi_type,
+                    "typecode": types.split("|")[0] if types else "050000",
+                    "address": f"模拟地址 {index} 号",
+                    "location": location,
+                    "distance": str(80 + index * 115),
+                    "biz_ext": {
+                        "rating": f"{4.0 + index / 10:.1f}",
+                        "cost": str(25 + index * 5),
+                    },
+                }
+            )
+        self._record("search_around", "mock", f"{label}使用模拟数据：{reason}", metric_start)
+        return self._with_meta(
+            {"status": "1", "count": str(len(pois)), "pois": pois}, "mock", reason
+        )
 
-    def _mock_weather(self, city: str, reason: str) -> dict[str, Any]:
+    def _mock_weather(
+        self, city: str, reason: str, metric_start: dict[str, int] | None = None
+    ) -> dict[str, Any]:
         reason = self._friendly_reason(reason)
         now = datetime.now()
         live = {
@@ -484,9 +669,13 @@ class AmapTools:
                 "daypower": "1-3",
             }
         ]
-        self._record("weather", "mock", f"天气使用模拟数据：{reason}")
+        self._record("weather", "mock", f"天气使用模拟数据：{reason}", metric_start)
         return self._with_meta(
-            {"status": "1", "lives": [live], "forecasts": [{"city": city, "casts": casts}]},
+            {
+                "status": "1",
+                "lives": [live],
+                "forecasts": [{"city": city, "casts": casts}],
+            },
             "mock",
             reason,
         )

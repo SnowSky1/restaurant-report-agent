@@ -6,7 +6,6 @@ from typing import Any
 
 from .state import AgentState, POIAnalysis
 
-
 POI_CATEGORIES = {
     "写字楼": {"keywords": "写字楼|办公楼", "types": "120201"},
     "住宅": {"keywords": "住宅|小区|公寓", "types": "120300"},
@@ -47,14 +46,16 @@ async def poi_node(state: AgentState, amap_tools: Any) -> dict:
             continue
         counts[category] += 1
         if sum(1 for item in details if item["category"] == category) < 5:
-            details.append({
+            details.append(
+                {
                     "category": category,
                     "name": poi.get("name", ""),
                     "distance": str(poi.get("distance") or ""),
                     "type": poi.get("type", ""),
                     "location": poi.get("location", ""),
                     "source": source,
-                })
+                }
+            )
 
     return {
         "poi_analysis": POIAnalysis(

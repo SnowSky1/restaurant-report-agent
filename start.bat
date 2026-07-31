@@ -1,11 +1,11 @@
 @echo off
 chcp 65001 >nul 2>&1
 setlocal
-title Restaurant Report Agent 0.1.0
+title Restaurant Report Agent 0.0.0
 set "ROOT=%~dp0"
 
 echo ============================================
-echo   Restaurant Report Agent 0.1.0
+echo   Restaurant Report Agent 0.0.0
 echo ============================================
 
 where python >nul 2>&1 || (echo [错误] 未找到 Python 3.10+ & pause & exit /b 1)

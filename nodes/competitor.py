@@ -6,7 +6,6 @@ from typing import Any
 
 from .state import AgentState, CompetitorInfo
 
-
 STORE_SEARCH = {
     "餐厅": ("餐饮", "050000"),
     "咖啡店": ("咖啡", "050500"),

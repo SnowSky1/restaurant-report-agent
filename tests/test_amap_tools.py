@@ -31,11 +31,17 @@ class AmapToolsTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
 
-        tools = AmapTools("", "test-key", data_mode="real", transport="rest", timeout=1)
-        await tools.http.aclose()
-        tools.http = httpx.AsyncClient(
+        client = httpx.AsyncClient(
             base_url="https://restapi.amap.com",
             transport=httpx.MockTransport(handler),
+        )
+        tools = AmapTools(
+            "",
+            "test-key",
+            data_mode="real",
+            transport="rest",
+            timeout=1,
+            http_client=client,
         )
         try:
             result = await tools.search_around("116.4,39.9", types="050000")
@@ -45,6 +51,79 @@ class AmapToolsTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(tools.provenance()["used_mock_data"])
         finally:
             await tools.close()
+            await client.aclose()
+
+    async def test_retry_and_cache_reduce_upstream_calls(self):
+        attempts = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(503, request=request, json={"status": "0"})
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "status": "1",
+                    "count": "1",
+                    "pois": [{"id": "C1", "name": "缓存测试", "distance": "100"}],
+                },
+            )
+
+        client = httpx.AsyncClient(
+            base_url="https://restapi.amap.com", transport=httpx.MockTransport(handler)
+        )
+        tools = AmapTools(
+            "",
+            "retry-cache-key",
+            data_mode="real",
+            transport="rest",
+            http_client=client,
+            max_retries=1,
+            cache_ttl_seconds=60,
+        )
+        try:
+            first = await tools.search_around("116.41,39.91", types="050000")
+            second = await tools.search_around("116.41,39.91", types="050000")
+            self.assertEqual(first["pois"], second["pois"])
+            self.assertEqual(attempts, 2)
+            self.assertEqual(tools.provenance()["api_calls"], 2)
+            self.assertEqual(tools.provenance()["cache_hits"], 1)
+            operations = tools.provenance()["operations"]
+            self.assertEqual(operations[0]["api_calls"], 2)
+            self.assertEqual(operations[1]["cache_hits"], 1)
+        finally:
+            await tools.close()
+            self.assertFalse(client.is_closed)
+            await client.aclose()
+
+    async def test_upstream_errors_do_not_disclose_api_key(self):
+        secret = "super-secret-amap-key"
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, request=request, json={"status": "0"})
+
+        client = httpx.AsyncClient(
+            base_url="https://restapi.amap.com", transport=httpx.MockTransport(handler)
+        )
+        tools = AmapTools(
+            "",
+            secret,
+            data_mode="real",
+            transport="rest",
+            http_client=client,
+            max_retries=0,
+            cache_ttl_seconds=0,
+        )
+        try:
+            with self.assertRaises(Exception) as context:
+                await tools.search_around("116.42,39.92", types="050000")
+            self.assertNotIn(secret, str(context.exception))
+            self.assertIn("HTTP 503", str(context.exception))
+        finally:
+            await tools.close()
+            await client.aclose()
 
 
 if __name__ == "__main__":

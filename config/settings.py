@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     data_mode: Literal["auto", "real", "mock"] = "auto"
     amap_transport: Literal["rest", "mcp"] = "rest"
     request_timeout_seconds: float = 30.0
+    amap_cache_ttl_seconds: float = 300.0
+    amap_max_retries: int = 2
+    amap_max_parallel_requests: int = 4
 
     # LLM provider selection.
     llm_provider: Literal["openai", "deepseek", "qwen", "siliconflow"] = "qwen"
@@ -51,10 +54,15 @@ class Settings(BaseSettings):
     # Map services. REST is the reliable primary path; MCP remains supported.
     amap_maps_api_key: str = ""
     amap_mcp_url: str = "https://mcp.modelscope.cn/sse/@amap/amap-maps"
-    chart_mcp_url: str = "https://mcp.modelscope.cn/sse/@antvis/mcp-server-chart"
-
     output_dir: str = "./reports"
+    save_api_reports: bool = False
+    report_retention_days: int = 30
     allowed_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000")
+    api_access_token: str = ""
+    api_rate_limit_per_minute: int = 20
+    max_concurrent_analyses: int = 2
+    analysis_timeout_seconds: float = 180.0
+    log_level: str = "INFO"
 
     def get_llm_config(self) -> dict[str, str]:
         configs = {

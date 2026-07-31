@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -122,6 +122,11 @@ def _load_krill_config() -> dict[str, str] | None:
     except (OSError, ValueError, TypeError):
         return None
     return None
+
+
+def krill_fallback_configured() -> bool:
+    """Report fallback readiness without exposing its credentials."""
+    return _load_krill_config() is not None
 
 
 def _prompt_text(prompt: Any) -> str:

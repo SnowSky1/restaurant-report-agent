@@ -75,8 +75,9 @@ async def location_node(state: AgentState, amap_tools: Any) -> dict:
                 adcode=adcode,
                 source=source,
             ),
+            "workflow_status": "running",
             "errors": errors,
         }
     except Exception as error:
         errors.append(f"位置解析失败：{error}")
-        return {"location": None, "errors": errors}
+        return {"location": None, "workflow_status": "failed", "errors": errors}

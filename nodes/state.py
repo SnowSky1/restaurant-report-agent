@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, TypedDict
+from typing import Any, TypedDict
 from uuid import uuid4
 
 
@@ -68,22 +68,23 @@ class AgentState(TypedDict, total=False):
     store_address: str
     store_type: str
     analysis_radius: int
-    input_coordinates: Optional[str]
-    avg_ticket: Optional[float]
-    seat_count: Optional[int]
-    daily_fixed_cost: Optional[float]
-    variable_cost_rate: Optional[float]
+    input_coordinates: str | None
+    avg_ticket: float | None
+    seat_count: int | None
+    daily_fixed_cost: float | None
+    variable_cost_rate: float | None
 
-    location: Optional[LocationInfo]
-    competitors: Optional[list[CompetitorInfo]]
-    traffic: Optional[TrafficInfo]
-    weather: Optional[WeatherData]
-    poi_analysis: Optional[POIAnalysis]
-    competition_analysis: Optional[dict[str, Any]]
-    revenue_simulation: Optional[dict[str, Any]]
-    charts: Optional[ChartData]
+    location: LocationInfo | None
+    competitors: list[CompetitorInfo] | None
+    traffic: TrafficInfo | None
+    weather: WeatherData | None
+    poi_analysis: POIAnalysis | None
+    competition_analysis: dict[str, Any] | None
+    revenue_simulation: dict[str, Any] | None
+    charts: ChartData | None
     provenance: dict[str, Any]
-    final_report: Optional[str]
+    final_report: str | None
+    workflow_status: str
     errors: list[str]
 
 
@@ -120,5 +121,6 @@ def create_initial_state(
         charts=None,
         provenance={},
         final_report=None,
+        workflow_status="pending",
         errors=[],
     )

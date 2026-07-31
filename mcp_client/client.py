@@ -7,9 +7,9 @@ the data provider where it can be disclosed to callers.
 
 from __future__ import annotations
 
+import json
 from contextlib import AsyncExitStack
 from datetime import timedelta
-import json
 from typing import Any
 
 from mcp import ClientSession
@@ -61,6 +61,15 @@ class MCPClient:
         assert self._session is not None
         result = await self._session.call_tool(tool_name, arguments)
 
+        if getattr(result, "isError", False):
+            messages = [
+                str(getattr(block, "text", "")).strip()
+                for block in getattr(result, "content", [])
+                if getattr(block, "text", None)
+            ]
+            detail = ": " + " ".join(messages)[:500] if messages else ""
+            raise RuntimeError(f"MCP tool {tool_name} returned an error{detail}")
+
         structured = getattr(result, "structuredContent", None)
         if isinstance(structured, dict):
             return structured
@@ -76,8 +85,6 @@ class MCPClient:
             except json.JSONDecodeError:
                 return {"content": text}
 
-        if getattr(result, "isError", False):
-            raise RuntimeError(f"MCP tool {tool_name} returned an error")
         return {}
 
     async def close(self) -> None:

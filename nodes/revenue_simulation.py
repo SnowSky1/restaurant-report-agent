@@ -9,21 +9,31 @@ data when available.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 from statistics import mean
 from typing import Any
 
 from .state import AgentState
-
 
 DEFAULTS = {
     "咖啡店": {"avg_ticket": 36.0, "seats": 42, "fixed": 3200.0, "variable": 0.36},
     "奶茶店": {"avg_ticket": 24.0, "seats": 18, "fixed": 2400.0, "variable": 0.34},
     "快餐店": {"avg_ticket": 32.0, "seats": 48, "fixed": 3600.0, "variable": 0.42},
     "火锅店": {"avg_ticket": 118.0, "seats": 90, "fixed": 8500.0, "variable": 0.45},
+    "烧烤店": {"avg_ticket": 82.0, "seats": 72, "fixed": 6500.0, "variable": 0.44},
+    "面馆": {"avg_ticket": 35.0, "seats": 44, "fixed": 3400.0, "variable": 0.40},
+    "西餐厅": {"avg_ticket": 128.0, "seats": 68, "fixed": 8200.0, "variable": 0.43},
+    "日料店": {"avg_ticket": 112.0, "seats": 54, "fixed": 7600.0, "variable": 0.46},
+    "韩餐厅": {"avg_ticket": 76.0, "seats": 62, "fixed": 5900.0, "variable": 0.44},
+    "川菜馆": {"avg_ticket": 68.0, "seats": 76, "fixed": 6100.0, "variable": 0.43},
+    "粤菜馆": {"avg_ticket": 88.0, "seats": 82, "fixed": 7200.0, "variable": 0.44},
+    "甜品店": {"avg_ticket": 31.0, "seats": 28, "fixed": 2800.0, "variable": 0.35},
+    "面包店": {"avg_ticket": 38.0, "seats": 24, "fixed": 3300.0, "variable": 0.38},
     "餐厅": {"avg_ticket": 58.0, "seats": 64, "fixed": 5200.0, "variable": 0.43},
 }
+
+SUPPORTED_STORE_TYPES = tuple(DEFAULTS)
 
 
 @dataclass
@@ -36,9 +46,27 @@ class MarketAgent:
 
 
 SCENARIOS = [
-    {"id": "value", "name": "价格渗透", "price_factor": 0.90, "quality_bonus": 0.00, "marketing_cost": 180.0},
-    {"id": "balanced", "name": "均衡经营", "price_factor": 1.00, "quality_bonus": 0.08, "marketing_cost": 120.0},
-    {"id": "premium", "name": "品质溢价", "price_factor": 1.10, "quality_bonus": 0.22, "marketing_cost": 220.0},
+    {
+        "id": "value",
+        "name": "价格渗透",
+        "price_factor": 0.90,
+        "quality_bonus": 0.00,
+        "marketing_cost": 180.0,
+    },
+    {
+        "id": "balanced",
+        "name": "均衡经营",
+        "price_factor": 1.00,
+        "quality_bonus": 0.08,
+        "marketing_cost": 120.0,
+    },
+    {
+        "id": "premium",
+        "name": "品质溢价",
+        "price_factor": 1.10,
+        "quality_bonus": 0.22,
+        "marketing_cost": 220.0,
+    },
 ]
 
 
@@ -58,29 +86,27 @@ def simulate_market(state: AgentState) -> dict[str, Any]:
     avg_ticket = _positive(state.get("avg_ticket"), defaults["avg_ticket"])
     seats = int(_positive(state.get("seat_count"), defaults["seats"]))
     fixed_cost = _positive(state.get("daily_fixed_cost"), defaults["fixed"])
-    variable_rate = min(max(_positive(state.get("variable_cost_rate"), defaults["variable"]), 0.05), 0.9)
+    variable_rate = min(
+        max(_positive(state.get("variable_cost_rate"), defaults["variable"]), 0.05), 0.9
+    )
 
     competitors = list(state.get("competitors") or [])[:10]
     competitor_costs = [
-        _positive(getattr(item, "average_cost", None), avg_ticket)
-        for item in competitors
+        _positive(getattr(item, "average_cost", None), avg_ticket) for item in competitors
     ]
-    competitor_ratings = [
-        _positive(getattr(item, "rating", None), 4.1)
-        for item in competitors
-    ]
+    competitor_ratings = [_positive(getattr(item, "rating", None), 4.1) for item in competitors]
 
     traffic = state.get("traffic")
-    traffic_score = float(getattr(traffic, "traffic_score", {}).get("综合", 5.0)) if traffic else 5.0
+    traffic_score = (
+        float(getattr(traffic, "traffic_score", {}).get("综合", 5.0)) if traffic else 5.0
+    )
     poi = state.get("poi_analysis")
     counts = getattr(poi, "poi_counts", {}) if poi else {}
     daily_market_orders = _market_demand(counts, traffic_score)
     capacity = max(24, seats * 3)
 
     consumers = _consumer_segments(counts)
-    agents = [
-        MarketAgent(state.get("store_name", "目标门店"), avg_ticket, 4.3, 0.0, True)
-    ]
+    agents = [MarketAgent(state.get("store_name", "目标门店"), avg_ticket, 4.3, 0.0, True)]
     for index, item in enumerate(competitors):
         agents.append(
             MarketAgent(
@@ -107,14 +133,57 @@ def simulate_market(state: AgentState) -> dict[str, Any]:
         )
         for scenario in SCENARIOS
     ]
-    recommended = max(simulations, key=lambda item: item["monthly_profit"])
+    best_available = max(simulations, key=lambda item: item["monthly_profit"])
+    feasible = [
+        item
+        for item in simulations
+        if item["monthly_profit"] > 0 and item["break_even_orders_per_day"] <= capacity
+    ]
+    recommended = max(feasible, key=lambda item: item["monthly_profit"]) if feasible else None
     baseline = next(item for item in simulations if item["id"] == "balanced")
+    sensitivity_low = _simulate_scenario(
+        {
+            **SCENARIOS[1],
+            "id": "ticket_minus_10pct",
+            "name": "仅客单价 -10%",
+            "price_factor": 0.90,
+        },
+        agents,
+        consumers,
+        daily_market_orders,
+        capacity,
+        fixed_cost,
+        variable_rate,
+    )
+    sensitivity_high = _simulate_scenario(
+        {
+            **SCENARIOS[1],
+            "id": "ticket_plus_10pct",
+            "name": "仅客单价 +10%",
+            "price_factor": 1.10,
+        },
+        agents,
+        consumers,
+        daily_market_orders,
+        capacity,
+        fixed_cost,
+        variable_rate,
+    )
+    projection_source = recommended or best_available
 
     return {
         "model": "competeai-inspired multi-agent scenario simulation v1",
         "currency": "CNY",
-        "recommended_strategy": recommended["id"],
-        "recommended_strategy_name": recommended["name"],
+        "viability_status": "viable" if recommended else "not_viable",
+        "recommendation_message": (
+            f"当前假设下可优先小规模验证“{recommended['name']}”"
+            if recommended
+            else "当前三个情景均未通过盈利与产能约束，不建议直接执行；请先降本、提升订单或补充真实经营数据"
+        ),
+        "recommended_strategy": recommended["id"] if recommended else None,
+        "recommended_strategy_name": recommended["name"] if recommended else None,
+        "best_available_strategy": best_available["id"],
+        "best_available_strategy_name": best_available["name"],
         "base_revenue": {
             "daily_orders": baseline["daily_orders"],
             "daily_revenue": baseline["daily_revenue"],
@@ -124,11 +193,21 @@ def simulate_market(state: AgentState) -> dict[str, Any]:
         },
         "scenario_simulations": simulations,
         "sensitivity_analysis": {
-            "ticket_minus_10pct_monthly_profit": next(item for item in simulations if item["id"] == "value")["monthly_profit"],
-            "ticket_plus_10pct_monthly_profit": next(item for item in simulations if item["id"] == "premium")["monthly_profit"],
-            "most_sensitive_variable": "订单量与客单价共同决定结果；请用真实 POS 数据替换默认假设",
+            "method": "以均衡经营为基线，仅改变客单价；品质加成和营销成本保持不变",
+            "ticket_minus_10pct_monthly_profit": sensitivity_low["monthly_profit"],
+            "ticket_plus_10pct_monthly_profit": sensitivity_high["monthly_profit"],
+            "baseline_monthly_profit": baseline["monthly_profit"],
         },
-        "monthly_projection": _monthly_projection(recommended["monthly_revenue"], recommended["monthly_profit"]),
+        "monthly_projection": _monthly_projection(
+            projection_source["monthly_revenue"],
+            fixed_cost,
+            variable_rate,
+            next(
+                item["marketing_cost"]
+                for item in SCENARIOS
+                if item["id"] == projection_source["id"]
+            ),
+        ),
         "assumptions": {
             "avg_ticket": avg_ticket,
             "seat_count": seats,
@@ -137,6 +216,7 @@ def simulate_market(state: AgentState) -> dict[str, Any]:
             "estimated_daily_market_orders": daily_market_orders,
             "capacity_orders_per_day": capacity,
             "observed_competitor_agents": len(competitors),
+            "synthetic_competitor_used": len(competitors) == 0,
             "simulation_rounds": 3,
             "days_per_month": 30,
             "poi_counts_are_api_sample": True,
@@ -180,16 +260,28 @@ def _simulate_scenario(
     share = mean(shares)
     daily_orders = round(min(capacity, market_orders * share), 1)
     daily_revenue = round(daily_orders * target.price, 2)
-    daily_profit = round(daily_revenue * (1 - variable_rate) - fixed_cost - scenario["marketing_cost"], 2)
+    daily_profit = round(
+        daily_revenue * (1 - variable_rate) - fixed_cost - scenario["marketing_cost"], 2
+    )
     monthly_revenue = round(daily_revenue * 30, 2)
     monthly_profit = round(daily_profit * 30, 2)
     contribution_per_order = target.price * (1 - variable_rate)
-    break_even = round((fixed_cost + scenario["marketing_cost"]) / max(contribution_per_order, 0.01), 1)
+    break_even = round(
+        (fixed_cost + scenario["marketing_cost"]) / max(contribution_per_order, 0.01), 1
+    )
 
     weekday_factors = [0.88, 0.93, 1.00, 1.04, 1.16, 1.28, 1.12]
     daily_series = [
-        {"name": day, "orders": round(daily_orders * factor), "revenue": round(daily_revenue * factor, 2)}
-        for day, factor in zip(["周一", "周二", "周三", "周四", "周五", "周六", "周日"], weekday_factors)
+        {
+            "name": day,
+            "orders": round(daily_orders * factor),
+            "revenue": round(daily_revenue * factor, 2),
+        }
+        for day, factor in zip(
+            ["周一", "周二", "周三", "周四", "周五", "周六", "周日"],
+            weekday_factors,
+            strict=True,
+        )
     ]
 
     return {
@@ -238,10 +330,30 @@ def _consumer_segments(counts: dict[str, int]) -> list[dict[str, float]]:
     }
     total = sum(raw.values())
     return [
-        {"weight": raw["office"] / total, "price_weight": 1.0, "quality_weight": 0.75, "distance_weight": 1.25},
-        {"weight": raw["resident"] / total, "price_weight": 1.25, "quality_weight": 0.8, "distance_weight": 1.0},
-        {"weight": raw["shopper"] / total, "price_weight": 0.85, "quality_weight": 1.05, "distance_weight": 0.75},
-        {"weight": raw["student"] / total, "price_weight": 1.55, "quality_weight": 0.55, "distance_weight": 1.0},
+        {
+            "weight": raw["office"] / total,
+            "price_weight": 1.0,
+            "quality_weight": 0.75,
+            "distance_weight": 1.25,
+        },
+        {
+            "weight": raw["resident"] / total,
+            "price_weight": 1.25,
+            "quality_weight": 0.8,
+            "distance_weight": 1.0,
+        },
+        {
+            "weight": raw["shopper"] / total,
+            "price_weight": 0.85,
+            "quality_weight": 1.05,
+            "distance_weight": 0.75,
+        },
+        {
+            "weight": raw["student"] / total,
+            "price_weight": 1.55,
+            "quality_weight": 0.55,
+            "distance_weight": 1.0,
+        },
     ]
 
 
@@ -258,12 +370,27 @@ def _market_demand(counts: dict[str, int], traffic_score: float) -> int:
     return round(min(max(estimate, 45), 420))
 
 
-def _monthly_projection(revenue: float, profit: float) -> list[dict[str, Any]]:
+def _monthly_projection(
+    revenue: float,
+    daily_fixed_cost: float,
+    variable_rate: float,
+    daily_marketing_cost: float,
+) -> list[dict[str, Any]]:
     factors = [0.90, 0.96, 1.00, 1.03, 1.06, 1.08]
-    return [
-        {"month": f"M{index}", "revenue": round(revenue * factor, 2), "profit": round(profit * factor, 2)}
-        for index, factor in enumerate(factors, 1)
-    ]
+    result = []
+    for index, factor in enumerate(factors, 1):
+        projected_revenue = revenue * factor
+        projected_profit = (
+            projected_revenue * (1 - variable_rate) - (daily_fixed_cost + daily_marketing_cost) * 30
+        )
+        result.append(
+            {
+                "month": f"M{index}",
+                "revenue": round(projected_revenue, 2),
+                "profit": round(projected_profit, 2),
+            }
+        )
+    return result
 
 
 def _positive(value: Any, default: float) -> float:

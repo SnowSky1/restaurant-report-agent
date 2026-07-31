@@ -27,6 +27,8 @@ ENV/
 
 # ============ Generated output ============
 reports/
+output/
+.playwright-cli/
 *.log
 
 # ============ Frontend ============
