@@ -1,5 +1,5 @@
 @echo off
-chcp 65001 >nul 2>&1
+chcp 936 >nul
 setlocal
 title Restaurant Report Agent 0.0.0
 set "ROOT=%~dp0"
@@ -8,24 +8,24 @@ echo ============================================
 echo   Restaurant Report Agent 0.0.0
 echo ============================================
 
-where python >nul 2>&1 || (echo [é”™è¯¯] æœªæ‰¾åˆ° Python 3.10+ & pause & exit /b 1)
-where node >nul 2>&1 || (echo [é”™è¯¯] æœªæ‰¾åˆ° Node.js 20.9+ & pause & exit /b 1)
-where npm >nul 2>&1 || (echo [é”™è¯¯] æœªæ‰¾åˆ° npm & pause & exit /b 1)
-if not exist "%ROOT%.env" (echo [é”™è¯¯] ç¼ºå°‘ .envï¼Œè¯·å…ˆä» .env.example å¤åˆ¶å¹¶é…ç½® & pause & exit /b 1)
-if not exist "%ROOT%frontend\.env.local" (echo [é”™è¯¯] ç¼ºå°‘ frontend\.env.localï¼Œè¯·å…ˆä» .env.example å¤åˆ¶å¹¶é…ç½® & pause & exit /b 1)
+where python >nul 2>&1 || (echo [´íÎó] Î´ÕÒµ½ Python 3.10+ & pause & exit /b 1)
+where node >nul 2>&1 || (echo [´íÎó] Î´ÕÒµ½ Node.js 20.9+ & pause & exit /b 1)
+where npm >nul 2>&1 || (echo [´íÎó] Î´ÕÒµ½ npm & pause & exit /b 1)
+if not exist "%ROOT%.env" (echo [´íÎó] È±ÉÙ .env£¬ÇëÏÈ´Ó .env.example ¸´ÖÆ²¢ÅäÖÃ & pause & exit /b 1)
+if not exist "%ROOT%frontend\.env.local" (echo [´íÎó] È±ÉÙ frontend\.env.local£¬ÇëÏÈ´Ó .env.example ¸´ÖÆ²¢ÅäÖÃ & pause & exit /b 1)
 
-netstat -ano | findstr /R /C:":8000 .*LISTENING" >nul && (echo [é”™è¯¯] ç«¯å£ 8000 å·²è¢«å ç”¨ï¼Œè¯·å…ˆç¡®è®¤å¯¹åº”è¿›ç¨‹ & pause & exit /b 1)
-netstat -ano | findstr /R /C:":3000 .*LISTENING" >nul && (echo [é”™è¯¯] ç«¯å£ 3000 å·²è¢«å ç”¨ï¼Œè¯·å…ˆç¡®è®¤å¯¹åº”è¿›ç¨‹ & pause & exit /b 1)
+netstat -ano | findstr /R /C:":8000 .*LISTENING" >nul && (echo [´íÎó] ¶Ë¿Ú 8000 ÒÑ±»Õ¼ÓÃ£¬ÇëÏÈÈ·ÈÏ¶ÔÓ¦½ø³Ì & pause & exit /b 1)
+netstat -ano | findstr /R /C:":3000 .*LISTENING" >nul && (echo [´íÎó] ¶Ë¿Ú 3000 ÒÑ±»Õ¼ÓÃ£¬ÇëÏÈÈ·ÈÏ¶ÔÓ¦½ø³Ì & pause & exit /b 1)
 
-echo [1/2] å¯åŠ¨ FastAPI...
+echo [1/2] Æô¶¯ FastAPI...
 start "Restaurant Agent Backend" /D "%ROOT%" cmd /k python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 timeout /t 3 /nobreak >nul
 
-echo [2/2] å¯åŠ¨ Next.js...
+echo [2/2] Æô¶¯ Next.js...
 start "Restaurant Agent Frontend" /D "%ROOT%frontend" cmd /k npm run dev -- --hostname 127.0.0.1 --port 3000
 timeout /t 4 /nobreak >nul
 
-echo å‰ç«¯: http://127.0.0.1:3000
+echo Ç°¶Ë: http://127.0.0.1:3000
 echo API:  http://127.0.0.1:8000/docs
 start "" http://127.0.0.1:3000
 endlocal

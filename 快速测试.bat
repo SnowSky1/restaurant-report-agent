@@ -1,37 +1,37 @@
 @echo off
-chcp 65001 >nul 2>&1
+chcp 936 >nul
 setlocal
 set "ROOT=%~dp0"
 cd /d "%ROOT%"
 
-echo [1/6] åç«¯é™æ€æ£€æŸ¥
+echo [1/6] ºó¶Ë¾²Ì¬¼ì²é
 ruff check api config graph main.py mcp_client nodes services tests tools || goto :failed
 ruff format --check api config graph main.py mcp_client nodes services tests tools || goto :failed
 
-echo [2/6] åç«¯å•å…ƒä¸é›†æˆæµ‹è¯•
+echo [2/6] ºó¶Ëµ¥ÔªÓë¼¯³É²âÊÔ
 python -m unittest discover -s tests -v || goto :failed
 
-echo [3/6] å‰ç«¯é€»è¾‘æµ‹è¯•
+echo [3/6] Ç°¶ËÂß¼­²âÊÔ
 pushd frontend
 call npm test || (popd & goto :failed)
 
-echo [4/6] å‰ç«¯ ESLint
+echo [4/6] Ç°¶Ë ESLint
 call npm run lint -- --no-cache || (popd & goto :failed)
 
-echo [5/6] Next.js ç”Ÿäº§æ„å»º
+echo [5/6] Next.js Éú²ú¹¹½¨
 call npm run build || (popd & goto :failed)
 
-echo [6/6] ç”Ÿäº§ä¾èµ–å®‰å…¨å®¡è®¡
+echo [6/6] Éú²úÒÀÀµ°²È«Éó¼Æ
 call npm audit --omit=dev || (popd & goto :failed)
 popd
 
 echo.
-echo å…¨éƒ¨æ£€æŸ¥é€šè¿‡ã€‚
+echo È«²¿¼ì²éÍ¨¹ı¡£
 pause
 exit /b 0
 
 :failed
 echo.
-echo æ£€æŸ¥å¤±è´¥ï¼Œè¯·æŸ¥çœ‹ä¸Šæ–¹æ—¥å¿—ã€‚
+echo ¼ì²éÊ§°Ü£¬Çë²é¿´ÉÏ·½ÈÕÖ¾¡£
 pause
 exit /b 1
